@@ -356,20 +356,27 @@ module.exports = function createPlugin (app) {
   }
 
   async function fetchCalibrationSeries (provider, sources, range, resolutionSeconds, filters = {}) {
-    const segments = await findUsefulSegments(provider, sources, range, resolutionSeconds, filters)
+    const coarseSegments = await findUsefulSegments(provider, sources, range, resolutionSeconds, filters)
+    const segments = []
     const heading = []
     const cog = []
     const sog = []
     const variation = []
 
-    const acceptedSegments = segments.filter(segment => segment.quality !== 'rejected')
-    for (const segment of acceptedSegments) {
+    for (const segment of coarseSegments) {
+      if (segment.quality === 'rejected') {
+        segments.push(segment)
+        continue
+      }
       const [segmentHeading, segmentCog, segmentSog, segmentVariation] = await Promise.all([
         provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, resolutionSeconds),
         provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, resolutionSeconds),
         provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, resolutionSeconds),
         provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, resolutionSeconds)
       ])
+      const refinedSegment = analyzeSegmentSamples(segment, segmentSog, segmentCog, filters, resolutionSeconds, 'fine')
+      segments.push(refinedSegment)
+      if (refinedSegment.quality === 'rejected') continue
       heading.push(...segmentHeading)
       cog.push(...segmentCog)
       sog.push(...segmentSog)
@@ -429,14 +436,18 @@ module.exports = function createPlugin (app) {
       provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, coarseResolution, 10000).catch(() => []),
       provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, coarseResolution, 10000).catch(() => [])
     ])
+    return analyzeSegmentSamples(segment, sog, cog, filters, coarseResolution, 'coarse')
+  }
+
+  function analyzeSegmentSamples (segment, sog, cog, filters = {}, resolutionSeconds = 1, pass = 'fine') {
     const speeds = sog.map(sample => sample.value).filter(value => Number.isFinite(value)).sort((a, b) => a - b)
     const cogRates = cogRatesDegPerSecond(cog).sort((a, b) => a - b)
-    const minSog = round1(clamp(percentile(speeds.filter(value => value > 0.2), 0.25) || filters.minSog || DEFAULT_OPTIONS.filters.minSog, 0.8, 3))
-    const localCogRate = round1(clamp(percentile(cogRates, 0.70) || filters.maxCogRate || DEFAULT_OPTIONS.filters.maxCogRate, 0.3, 3))
+    const minSog = round1(clamp(percentile(speeds.filter(value => value > 0.2), pass === 'fine' ? 0.20 : 0.25) || filters.minSog || DEFAULT_OPTIONS.filters.minSog, 0.8, 3))
+    const localCogRate = round1(clamp(percentile(cogRates, pass === 'fine' ? 0.90 : 0.75) || filters.maxCogRate || DEFAULT_OPTIONS.filters.maxCogRate, 0.5, 6))
     const medianCogRate = percentile(cogRates, 0.50) || 0
     const p90CogRate = percentile(cogRates, 0.90) || 0
     const durationSeconds = (new Date(segment.to).getTime() - new Date(segment.from).getTime()) / 1000
-    const quality = durationSeconds < Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration) || speeds.length < 3 || p90CogRate > 8
+    const quality = durationSeconds < Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration) || speeds.length < 3 || cog.length < 3
       ? 'rejected'
       : p90CogRate > 4
         ? 'weak'
@@ -447,9 +458,15 @@ module.exports = function createPlugin (app) {
       minSog,
       maxCogRate: localCogRate,
       quality,
-      reason: quality === 'rejected' ? 'too short, sparse, or unstable' : null,
+      reason: quality === 'rejected'
+        ? 'too short or sparse'
+        : p90CogRate > localCogRate
+          ? 'high course variation; filtering at local threshold'
+          : null,
       stats: {
         durationSeconds: Math.round(durationSeconds),
+        analysisPass: pass,
+        analysisResolutionSeconds: Number(resolutionSeconds),
         sogMedian: round1(percentile(speeds, 0.50) || 0),
         cogRateMedian: round1(medianCogRate),
         cogRateP90: round1(p90CogRate),
