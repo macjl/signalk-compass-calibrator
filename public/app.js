@@ -190,8 +190,7 @@ async function loadRuntime () {
 
 async function api (url, body) {
   const endpoint = url.replace(/^\/+/, '')
-  const basePath = window.location.pathname.endsWith('/') ? window.location.pathname : `${window.location.pathname}/`
-  const requestUrl = new URL(endpoint, `${window.location.origin}${basePath}`)
+  const requestUrl = new URL(endpoint, `${window.location.origin}/plugins/compass-calibrator/`)
   const options = body === undefined
     ? {}
     : {
