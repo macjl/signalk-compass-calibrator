@@ -32,6 +32,14 @@ const sourceInputs = {
   }
 }
 
+const metricInputs = {
+  headingMagnetic: 'metricHeadingMagnetic',
+  courseOverGroundTrue: 'metricCourseOverGroundTrue',
+  speedOverGround: 'metricSpeedOverGround',
+  magneticVariation: 'metricMagneticVariation',
+  rateOfTurn: 'metricRateOfTurn'
+}
+
 setDefaultDates()
 bindEvents()
 loadRuntime().catch(showError)
@@ -75,6 +83,7 @@ async function loadSources () {
     document.getElementById('baseUrl').value = data.prometheus.baseUrl || ''
     document.getElementById('historyUsername').value = data.prometheus.auth && data.prometheus.auth.username || ''
   }
+  if (data.metrics) setMetricInputs(data.metrics)
   if (data.selected) {
     document.getElementById('headingSource').value = data.selected.heading || ''
     document.getElementById('cogSource').value = data.selected.cog || ''
@@ -88,6 +97,7 @@ async function discoverSources () {
     baseUrl: value('baseUrl'),
     auth: historyAuth(),
     context: value('context'),
+    metrics: metricValues(),
     range: {
       from: dateValue('discoverFrom'),
       to: dateValue('discoverTo')
@@ -171,6 +181,7 @@ async function runCalibration () {
     baseUrl: value('baseUrl'),
     auth: historyAuth(),
     context: value('context'),
+    metrics: metricValues(),
     range: {
       from: dateValue('from'),
       to: dateValue('to')
@@ -304,6 +315,18 @@ function historyAuth () {
     type: 'basic',
     username,
     password
+  }
+}
+
+function metricValues () {
+  return Object.fromEntries(
+    Object.entries(metricInputs).map(([key, id]) => [key, value(id)])
+  )
+}
+
+function setMetricInputs (metrics) {
+  for (const [key, id] of Object.entries(metricInputs)) {
+    if (metrics[key]) document.getElementById(id).value = metrics[key]
   }
 }
 

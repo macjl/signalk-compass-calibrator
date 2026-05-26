@@ -149,6 +149,17 @@ select {
   margin-top: 14px;
 }
 
+.advanced {
+  margin-top: 14px;
+}
+
+.advanced summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 750;
+  margin-bottom: 10px;
+}
+
 .summary {
   border: 1px solid var(--line);
   border-radius: 6px;

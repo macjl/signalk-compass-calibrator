@@ -48,6 +48,31 @@
         <div class="actions">
           <button id="discover" type="button">Discover historical sources</button>
         </div>
+        <details class="advanced">
+          <summary>Metric names</summary>
+          <div class="grid">
+            <label>
+              Heading magnetic metric
+              <input id="metricHeadingMagnetic" value="navigation_headingMagnetic">
+            </label>
+            <label>
+              COG true metric
+              <input id="metricCourseOverGroundTrue" value="navigation_courseOverGroundTrue">
+            </label>
+            <label>
+              SOG metric
+              <input id="metricSpeedOverGround" value="navigation_speedOverGround">
+            </label>
+            <label>
+              Magnetic variation metric
+              <input id="metricMagneticVariation" value="navigation_magneticVariation">
+            </label>
+            <label>
+              Rate of turn metric
+              <input id="metricRateOfTurn" value="navigation_rateOfTurn">
+            </label>
+          </div>
+        </details>
         <div id="sources" class="tableWrap"></div>
       </section>
 
