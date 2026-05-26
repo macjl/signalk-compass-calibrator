@@ -14,6 +14,10 @@ const DISCOVERY_RESOLUTION_SECONDS = 30
 const FINE_CALIBRATION_RESOLUTION_SECONDS = 1
 const MAX_COARSE_SCAN_RESOLUTION_SECONDS = 60
 const SEGMENT_BOUNDARY_PADDING_SECONDS = 60
+const STABLE_COG_WINDOW_SECONDS = 15
+const STABLE_COG_MIN_DURATION_SECONDS = 30
+const STABLE_COG_MERGE_GAP_SECONDS = 5
+const HEADING_COVERAGE_BIN_DEG = 10
 
 const DEFAULT_OPTIONS = {
   enabled: true,
@@ -269,7 +273,7 @@ module.exports = function createPlugin (app) {
       assertSources(sources)
       const filters = { ...options.filters, ...(body.filters || {}) }
       const { series, segments } = await fetchCalibrationSeries(provider, sources, range, filters)
-      filters.segments = segments
+      filters.segments = calibrationSegmentsFromNavigationSegments(segments)
         .filter(segment => segment.quality !== 'rejected')
         .map(segment => ({
           from: segment.from,
@@ -377,13 +381,24 @@ module.exports = function createPlugin (app) {
         provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
         provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, FINE_CALIBRATION_RESOLUTION_SECONDS)
       ])
-      const refinedSegment = analyzeSegmentSamples(segment, segmentSog, segmentCog, filters, FINE_CALIBRATION_RESOLUTION_SECONDS, 'fine')
-      segments.push(refinedSegment)
-      if (refinedSegment.quality === 'rejected') continue
-      heading.push(...segmentHeading)
-      cog.push(...segmentCog)
-      sog.push(...segmentSog)
-      variation.push(...segmentVariation)
+      const navigationSegment = analyzeSegmentSamples(segment, segmentSog, segmentCog, filters, FINE_CALIBRATION_RESOLUTION_SECONDS, 'fine')
+      navigationSegment.stableSegments = buildStableCogSegments(navigationSegment, segmentSog, segmentCog, segmentHeading, filters)
+      navigationSegment.headingBins = mergeHeadingBins(navigationSegment.stableSegments.map(stable => stable.headingBins))
+      navigationSegment.quality = navigationSegment.stableSegments.length > 0
+        ? navigationSegment.quality
+        : 'rejected'
+      navigationSegment.reason = navigationSegment.stableSegments.length > 0
+        ? navigationSegment.reason
+        : 'no stable COG sub-segment found'
+      navigationSegment.stats.stableSegmentCount = navigationSegment.stableSegments.length
+      navigationSegment.stats.acceptedSamples = navigationSegment.stableSegments.reduce((sum, stable) => sum + Number(stable.stats && stable.stats.samples && stable.stats.samples.heading || 0), 0)
+      segments.push(navigationSegment)
+      for (const stableSegment of navigationSegment.stableSegments) {
+        heading.push(...samplesInRange(segmentHeading, stableSegment))
+        cog.push(...samplesInRange(segmentCog, stableSegment))
+        sog.push(...samplesInRange(segmentSog, stableSegment))
+        variation.push(...samplesInRange(segmentVariation, stableSegment))
+      }
     }
 
     return {
@@ -539,6 +554,76 @@ module.exports = function createPlugin (app) {
         }
       }
     }
+  }
+
+  function buildStableCogSegments (navigationSegment, sog, cog, heading, filters = {}) {
+    const minSog = Number(navigationSegment.minSog || filters.minSog || DEFAULT_OPTIONS.filters.minSog)
+    const threshold = stableCogRateThreshold(cog)
+    const sogByTime = new Map(sog.map(sample => [sample.t, sample.value]))
+    const states = []
+    const rateWindow = []
+    let windowSum = 0
+
+    const sortedCog = dedupeSamples(cog).sort((a, b) => a.t - b.t)
+    for (let index = 1; index < sortedCog.length; index += 1) {
+      const previous = sortedCog[index - 1]
+      const current = sortedCog[index]
+      const dt = (current.t - previous.t) / 1000
+      if (dt <= 0) continue
+      const rate = Math.abs(wrap180Deg(radToDeg(current.value - previous.value))) / dt
+      if (!Number.isFinite(rate)) continue
+      rateWindow.push({ t: current.t, rate })
+      windowSum += rate
+      while (rateWindow.length && current.t - rateWindow[0].t > STABLE_COG_WINDOW_SECONDS * 1000) {
+        windowSum -= rateWindow.shift().rate
+      }
+      const smoothedRate = rateWindow.length ? windowSum / rateWindow.length : rate
+      const speed = sogByTime.get(current.t)
+      states.push({
+        from: previous.t,
+        to: current.t,
+        stable: Number.isFinite(speed) && speed >= minSog && smoothedRate <= threshold,
+        smoothedRate
+      })
+    }
+
+    const rawSegments = segmentsFromStates(states, STABLE_COG_MIN_DURATION_SECONDS)
+    const merged = mergeSegments(
+      rawSegments.map(segment => ({
+        from: new Date(segment.from).toISOString(),
+        to: new Date(segment.to).toISOString()
+      })),
+      STABLE_COG_MERGE_GAP_SECONDS * 1000
+    )
+
+    return merged.map((segment, index) => {
+      const stableSog = samplesInRange(sog, segment)
+      const stableCog = samplesInRange(cog, segment)
+      const stableHeading = samplesInRange(heading, segment)
+      const analyzed = analyzeSegmentSamples(segment, stableSog, stableCog, {
+        ...filters,
+        minSog,
+        maxCogRate: threshold
+      }, FINE_CALIBRATION_RESOLUTION_SECONDS, 'stable')
+      const maxCogRate = round1(clamp(threshold * 1.2, 0.5, 2.5))
+      return {
+        ...analyzed,
+        id: `${navigationSegment.from}-${index + 1}`,
+        parentFrom: navigationSegment.from,
+        parentTo: navigationSegment.to,
+        maxCogRate,
+        stableCogThreshold: round1(threshold),
+        stableWindowSeconds: STABLE_COG_WINDOW_SECONDS,
+        headingBins: headingBinCounts(stableHeading, HEADING_COVERAGE_BIN_DEG),
+        stats: {
+          ...analyzed.stats,
+          samples: {
+            ...analyzed.stats.samples,
+            heading: stableHeading.length
+          }
+        }
+      }
+    }).filter(segment => segment.quality !== 'rejected')
   }
 
   function assertSources (sources) {
@@ -766,6 +851,24 @@ function mergeSegments (segments, mergeGapMs) {
   }))
 }
 
+function segmentsFromStates (states, minDurationSeconds) {
+  const segments = []
+  let start = null
+  let last = null
+  for (const state of states) {
+    if (state.stable) {
+      if (start === null) start = state.from
+      last = state.to
+    } else if (start !== null) {
+      if (last - start >= minDurationSeconds * 1000) segments.push({ from: start, to: last })
+      start = null
+      last = null
+    }
+  }
+  if (start !== null && last - start >= minDurationSeconds * 1000) segments.push({ from: start, to: last })
+  return segments
+}
+
 function dedupeSamples (samples) {
   const byTime = new Map()
   for (const sample of samples) byTime.set(sample.t, sample)
@@ -782,6 +885,59 @@ function cogRatesDegPerSecond (samples) {
     if (Number.isFinite(rate) && rate > 0) rates.push(rate)
   }
   return rates
+}
+
+function stableCogRateThreshold (samples) {
+  const rates = cogRatesDegPerSecond(samples).sort((a, b) => a - b)
+  const median = percentile(rates, 0.50)
+  if (!Number.isFinite(median)) return 1.5
+  return clamp(median * 1.5, 0.5, 2)
+}
+
+function samplesInRange (samples, range) {
+  const from = new Date(range.from).getTime()
+  const to = new Date(range.to).getTime()
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return []
+  return samples.filter(sample => sample.t >= from && sample.t <= to)
+}
+
+function headingBinCounts (headingSamples, binSizeDeg) {
+  const binCount = Math.ceil(360 / binSizeDeg)
+  const bins = Array.from({ length: binCount }, (_, index) => ({
+    fromDeg: index * binSizeDeg,
+    toDeg: Math.min((index + 1) * binSizeDeg, 360),
+    samples: 0
+  }))
+  for (const sample of headingSamples) {
+    if (!Number.isFinite(sample.value)) continue
+    const headingDeg = radToDeg(wrap360Rad(sample.value))
+    const index = Math.min(Math.floor(headingDeg / binSizeDeg), binCount - 1)
+    bins[index].samples += 1
+  }
+  return bins
+}
+
+function mergeHeadingBins (binsList) {
+  const merged = headingBinCounts([], HEADING_COVERAGE_BIN_DEG)
+  for (const bins of binsList) {
+    if (!Array.isArray(bins)) continue
+    for (let index = 0; index < Math.min(merged.length, bins.length); index += 1) {
+      merged[index].samples += Number(bins[index].samples || 0)
+    }
+  }
+  return merged
+}
+
+function calibrationSegmentsFromNavigationSegments (segments) {
+  const flat = []
+  for (const segment of segments || []) {
+    if (Array.isArray(segment.stableSegments) && segment.stableSegments.length > 0) {
+      flat.push(...segment.stableSegments)
+    } else {
+      flat.push(segment)
+    }
+  }
+  return flat
 }
 
 async function buildRecommendations (provider, discovered, range) {

@@ -3,8 +3,9 @@
 let candidateProfile = null
 let restoredFields = new Set()
 
-const STORAGE_KEY = 'signalk-compass-calibrator.settings.v1'
+const STORAGE_KEY = 'signalk-compass-calibrator.settings.v2'
 const SECRET_STORAGE_KEY = 'signalk-compass-calibrator.sessionSecrets.v1'
+const MPS_TO_KNOTS = 1.9438444924406
 
 const paths = {
   heading: 'navigation.headingMagnetic',
@@ -129,7 +130,7 @@ function renderSources (data) {
         source.coveragePercent,
         source.firstSample || '',
         source.lastSample || '',
-        formatValue(source.latestValue)
+        formatSourceLatest(path, source.latestValue)
       ])
     }
   }
@@ -215,7 +216,7 @@ function applyRecommendations (recommendations) {
   }
 
   if (recommendations.filters) {
-    setNumberIfFinite('minSog', recommendations.filters.minSog)
+    setNumberIfFinite('minSog', mpsToKnots(recommendations.filters.minSog))
     setNumberIfFinite('maxCogRate', recommendations.filters.maxCogRate)
     setNumberIfFinite('minSamplesPerBin', recommendations.filters.minSamplesPerBin)
   }
@@ -247,6 +248,11 @@ function sourceScore (source) {
   return Number(source.coveragePercent || 0) * 1000000 + Number(source.sampleCount || 0)
 }
 
+function formatSourceLatest (path, latestValue) {
+  if (path === paths.sog) return `${formatValue(mpsToKnots(latestValue))} kn`
+  return formatValue(latestValue)
+}
+
 async function runCalibration () {
   const payload = {
     baseUrl: value('baseUrl'),
@@ -264,7 +270,7 @@ async function runCalibration () {
       variation: value('variationSource')
     },
     filters: {
-      minSog: numberValue('minSog'),
+      minSog: knotsToMps(numberValue('minSog')),
       maxCogRate: numberValue('maxCogRate'),
       minSamplesPerBin: numberValue('minSamplesPerBin')
     },
@@ -290,6 +296,7 @@ function renderProfile (profile) {
       ${metric('Stddev', `${formatValue(profile.quality.stddevDeg)} deg`)}
     </div>
     ${profile.warnings && profile.warnings.length ? `<p class="warning">${profile.warnings.map(escapeHtml).join('<br>')}</p>` : ''}
+    ${renderCalibrationTimeline(profile)}
     ${renderSegmentSummary(profile.segments || [])}
   `
   document.getElementById('table').innerHTML = table(
@@ -312,22 +319,106 @@ function renderSegmentSummary (segments) {
   return `
     <h3>Selected periods</h3>
     ${table(
-      ['From', 'To', 'Moving from', 'Moving to', 'Quality', 'Fine step', 'Min SOG', 'Max COG rate', 'SOG median', 'COG rate p90', 'Samples', 'Reason'],
+      ['From', 'To', 'Moving from', 'Moving to', 'Stable parts', 'Quality', 'Fine step', 'Min SOG', 'Max COG rate', 'SOG median', 'COG rate p90', 'Samples', 'Reason'],
       segments.map(segment => [
         escapeHtml(segment.from || ''),
         escapeHtml(segment.to || ''),
         escapeHtml(segment.movementFrom || ''),
         escapeHtml(segment.movementTo || ''),
+        Array.isArray(segment.stableSegments) ? segment.stableSegments.length : '',
         `<span class="quality-${escapeHtml(segment.quality || 'missing')}">${escapeHtml(segment.quality || '')}</span>`,
         segment.stats && segment.stats.analysisResolutionSeconds ? `${formatValue(segment.stats.analysisResolutionSeconds)} s` : '',
-        `${formatValue(segment.minSog)} m/s`,
+        `${formatValue(mpsToKnots(segment.minSog))} kn`,
         `${formatValue(segment.maxCogRate)} deg/s`,
-        `${formatValue(segment.stats && segment.stats.sogMedian)} m/s`,
+        `${formatValue(mpsToKnots(segment.stats && segment.stats.sogMedian))} kn`,
         `${formatValue(segment.stats && segment.stats.cogRateP90)} deg/s`,
-        segment.stats && segment.stats.samples ? `${formatValue(segment.stats.samples.sog)} SOG / ${formatValue(segment.stats.samples.cog)} COG` : '',
+        segment.stats && segment.stats.samples ? `${formatValue(segment.stats.acceptedSamples || 0)} used / ${formatValue(segment.stats.samples.sog)} SOG / ${formatValue(segment.stats.samples.cog)} COG` : '',
         escapeHtml(segment.reason || '')
       ])
     )}
+  `
+}
+
+function renderCalibrationTimeline (profile) {
+  const segments = profile.segments || []
+  if (!segments.length || !profile.range) return ''
+  const range = normalizeRange(profile.range)
+  if (!range) return ''
+  return `
+    <h3>Calibration timeline</h3>
+    <div class="timelineLegend">
+      <span><i class="legendNavigation"></i>navigation</span>
+      <span><i class="legendStable"></i>COG stable used</span>
+      <span><i class="legendRejected"></i>rejected</span>
+    </div>
+    <div class="timelineScale">
+      <span>${escapeHtml(formatDateTime(range.from))}</span>
+      <span>${escapeHtml(formatDateTime((range.from + range.to) / 2))}</span>
+      <span>${escapeHtml(formatDateTime(range.to))}</span>
+    </div>
+    <div class="timelineTrack globalTimeline">
+      ${segments.map(segment => timelineBlock(segment, range, 'navigation')).join('')}
+      ${segments.flatMap(segment => segment.stableSegments || []).map(segment => timelineBlock(segment, range, 'stable')).join('')}
+    </div>
+    <div class="periodZooms">
+      ${segments.map((segment, index) => renderNavigationZoom(segment, index)).join('')}
+    </div>
+  `
+}
+
+function renderNavigationZoom (segment, index) {
+  const range = normalizeRange(segment)
+  if (!range) return ''
+  const stableSegments = segment.stableSegments || []
+  const durationMinutes = Math.round((range.to - range.from) / 6000) / 10
+  const coverageDeg = headingCoverageDeg(segment.headingBins || [])
+  const acceptedSamples = segment.stats && segment.stats.acceptedSamples || 0
+  return `
+    <details class="periodZoom" ${index === 0 ? 'open' : ''}>
+      <summary>
+        <span>Navigation ${index + 1}</span>
+        <small>${escapeHtml(formatDateTime(range.from))} - ${escapeHtml(formatDateTime(range.to))} · ${durationMinutes} min · ${acceptedSamples} samples · ${coverageDeg} deg</small>
+      </summary>
+      <div class="timelineScale">
+        <span>${escapeHtml(formatDateTime(range.from))}</span>
+        <span>${escapeHtml(formatDateTime((range.from + range.to) / 2))}</span>
+        <span>${escapeHtml(formatDateTime(range.to))}</span>
+      </div>
+      <div class="timelineTrack zoomTimeline">
+        ${timelineBlock(segment, range, segment.quality === 'rejected' ? 'rejected' : 'navigation')}
+        ${stableSegments.map(stable => timelineBlock(stable, range, 'stable')).join('')}
+      </div>
+      <div class="zoomSummary">
+        ${metric('Stable parts', stableSegments.length)}
+        ${metric('Used samples', acceptedSamples)}
+        ${metric('Median speed', `${formatValue(mpsToKnots(segment.stats && segment.stats.sogMedian))} kn`)}
+        ${metric('COG p90', `${formatValue(segment.stats && segment.stats.cogRateP90)} deg/s`)}
+        ${metric('Heading coverage', `${coverageDeg} deg`)}
+      </div>
+      ${renderHeadingBins(segment.headingBins || [])}
+    </details>
+  `
+}
+
+function timelineBlock (segment, range, type) {
+  const segmentRange = normalizeRange(segment)
+  if (!segmentRange) return ''
+  const left = percent((segmentRange.from - range.from) / (range.to - range.from))
+  const width = Math.max(0.3, percent((segmentRange.to - segmentRange.from) / (range.to - range.from)))
+  return `<span class="timelineBlock ${type}" style="left:${left}%;width:${width}%" title="${escapeHtml(formatDateTime(segmentRange.from))} - ${escapeHtml(formatDateTime(segmentRange.to))}"></span>`
+}
+
+function renderHeadingBins (bins) {
+  if (!bins.length) return ''
+  const maxSamples = Math.max(1, ...bins.map(bin => Number(bin.samples || 0)))
+  return `
+    <div class="headingBins" aria-label="Heading coverage">
+      ${bins.map(bin => {
+        const level = Math.max(3, Math.round(Number(bin.samples || 0) / maxSamples * 100))
+        const label = `${bin.fromDeg}-${bin.toDeg} deg: ${bin.samples} samples`
+        return `<span class="${bin.samples > 0 ? 'covered' : 'empty'}" style="height:${level}%" title="${escapeHtml(label)}"></span>`
+      }).join('')}
+    </div>
   `
 }
 
@@ -590,6 +681,37 @@ function setIfNotRestored (id, nextValue) {
 
 function numberValue (id) {
   return Number(document.getElementById(id).value)
+}
+
+function normalizeRange (range) {
+  const from = new Date(range.from).getTime()
+  const to = new Date(range.to).getTime()
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null
+  return { from, to }
+}
+
+function percent (fraction) {
+  return Math.round(Math.max(0, Math.min(1, fraction)) * 1000) / 10
+}
+
+function formatDateTime (input) {
+  const date = new Date(input)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toISOString().slice(0, 16).replace('T', ' ')
+}
+
+function headingCoverageDeg (bins) {
+  return bins.filter(bin => Number(bin.samples || 0) > 0).length * 10
+}
+
+function mpsToKnots (value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number * MPS_TO_KNOTS : null
+}
+
+function knotsToMps (value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number / MPS_TO_KNOTS : null
 }
 
 function formatValue (input) {

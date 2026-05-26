@@ -13,8 +13,8 @@ The calibration step uses a Prometheus-compatible history backend such as Victor
 - Select one raw magnetic heading source to calibrate.
 - Select COG, SOG, and magnetic variation reference sources.
 - Discover historical sources through Prometheus/VictoriaMetrics labels.
-- Run explicit batch calibration over a selected time range, with coarse preselection of useful moving periods and 1-second boundary refinement.
-- Review correction bins, selected periods, adaptive per-period thresholds, quality metrics, warnings, and a correction plot.
+- Run explicit batch calibration over a selected time range, with coarse preselection of useful moving periods, 1-second boundary refinement, and stable COG sub-segment selection.
+- Review timelines, zoomed navigation periods, heading coverage, correction bins, adaptive per-period thresholds, quality metrics, warnings, and a correction plot.
 - Save, reject, archive, or activate profiles.
 - Publish only the corrected heading at runtime on `navigation.headingMagnetic`.
 - Avoid feedback loops by ignoring the plugin's own Signal K source.
@@ -37,7 +37,7 @@ The plugin exposes settings for:
 - Signal K context, inferred from `navigation.magneticVariation` by the web app when possible.
 - metric names for heading, COG, SOG, and variation.
 - source selections.
-- calibration filters, used as defaults before adaptive per-period thresholds are computed. Final calibration samples are fetched at a fixed 1-second resolution.
+- calibration filters, used as defaults before adaptive per-period thresholds are computed. Speeds are shown in knots in the web app; final calibration samples are fetched at a fixed 1-second resolution.
 - publishing source and output path.
 
 Default runtime output:

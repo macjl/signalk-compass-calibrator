@@ -202,6 +202,135 @@ select {
   margin-top: 14px;
 }
 
+.timelineLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
+.timelineLegend span {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.timelineLegend i {
+  border-radius: 999px;
+  display: inline-block;
+  height: 8px;
+  width: 22px;
+}
+
+.legendNavigation {
+  background: #5077a7;
+}
+
+.legendStable {
+  background: var(--good);
+}
+
+.legendRejected {
+  background: var(--bad);
+}
+
+.timelineScale {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 8px;
+}
+
+.timelineTrack {
+  position: relative;
+  height: 34px;
+  margin-top: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f1f3ef;
+  overflow: hidden;
+}
+
+.timelineBlock {
+  position: absolute;
+  border-radius: 5px;
+}
+
+.timelineBlock.navigation {
+  top: 8px;
+  height: 18px;
+  background: #5077a7;
+}
+
+.timelineBlock.stable {
+  top: 12px;
+  height: 10px;
+  background: var(--good);
+  z-index: 2;
+}
+
+.timelineBlock.rejected {
+  top: 8px;
+  height: 18px;
+  background: var(--bad);
+}
+
+.periodZooms {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.periodZoom {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.periodZoom summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.periodZoom summary small {
+  color: var(--muted);
+  display: block;
+  font-weight: 500;
+}
+
+.zoomSummary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.headingBins {
+  align-items: end;
+  display: grid;
+  grid-template-columns: repeat(36, 1fr);
+  gap: 2px;
+  height: 74px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.headingBins span {
+  min-height: 3px;
+  border-radius: 3px 3px 0 0;
+}
+
+.headingBins .covered {
+  background: var(--good);
+}
+
+.headingBins .empty {
+  background: #d8ded8;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
