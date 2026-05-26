@@ -291,6 +291,7 @@ function renderProfile (profile) {
       ${metric('Stddev', `${formatValue(profile.quality.stddevDeg)} deg`)}
     </div>
     ${profile.warnings && profile.warnings.length ? `<p class="warning">${profile.warnings.map(escapeHtml).join('<br>')}</p>` : ''}
+    ${renderSegmentSummary(profile.segments || [])}
   `
   document.getElementById('table').innerHTML = table(
     ['Heading', 'Correction', 'Samples', 'Mean error', 'Stddev', 'Quality', 'Interpolated'],
@@ -305,6 +306,27 @@ function renderProfile (profile) {
     ])
   )
   drawPlot(profile)
+}
+
+function renderSegmentSummary (segments) {
+  if (!segments.length) return ''
+  return `
+    <h3>Selected periods</h3>
+    ${table(
+      ['From', 'To', 'Quality', 'Min SOG', 'Max COG rate', 'SOG median', 'COG rate p90', 'Samples', 'Reason'],
+      segments.map(segment => [
+        escapeHtml(segment.from || ''),
+        escapeHtml(segment.to || ''),
+        `<span class="quality-${escapeHtml(segment.quality || 'missing')}">${escapeHtml(segment.quality || '')}</span>`,
+        `${formatValue(segment.minSog)} m/s`,
+        `${formatValue(segment.maxCogRate)} deg/s`,
+        `${formatValue(segment.stats && segment.stats.sogMedian)} m/s`,
+        `${formatValue(segment.stats && segment.stats.cogRateP90)} deg/s`,
+        segment.stats && segment.stats.samples ? `${formatValue(segment.stats.samples.sog)} SOG / ${formatValue(segment.stats.samples.cog)} COG` : '',
+        escapeHtml(segment.reason || '')
+      ])
+    )}
+  `
 }
 
 async function activateCandidate () {

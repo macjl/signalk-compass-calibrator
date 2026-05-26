@@ -265,7 +265,17 @@ module.exports = function createPlugin (app) {
       assertSources(sources)
       const filters = { ...options.filters, ...(body.filters || {}) }
       const resolutionSeconds = body.resolutionSeconds || 1
-      const series = await fetchCalibrationSeries(provider, sources, range, resolutionSeconds, filters)
+      const { series, segments } = await fetchCalibrationSeries(provider, sources, range, resolutionSeconds, filters)
+      filters.segments = segments
+        .filter(segment => segment.quality !== 'rejected')
+        .map(segment => ({
+          from: segment.from,
+          to: segment.to,
+          minSog: segment.minSog,
+          maxCogRate: segment.maxCogRate,
+          quality: segment.quality,
+          reason: segment.reason || null
+        }))
       const profile = calibrate(series, {
         id: body.id,
         range,
@@ -273,6 +283,7 @@ module.exports = function createPlugin (app) {
         filters,
         calibration: { ...options.calibration, ...(body.calibration || {}) }
       })
+      profile.segments = segments
       store.upsert(profile)
       return profile
     }))
@@ -351,7 +362,8 @@ module.exports = function createPlugin (app) {
     const sog = []
     const variation = []
 
-    for (const segment of segments) {
+    const acceptedSegments = segments.filter(segment => segment.quality !== 'rejected')
+    for (const segment of acceptedSegments) {
       const [segmentHeading, segmentCog, segmentSog, segmentVariation] = await Promise.all([
         provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, resolutionSeconds),
         provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, resolutionSeconds),
@@ -365,10 +377,13 @@ module.exports = function createPlugin (app) {
     }
 
     return {
-      heading: dedupeSamples(heading),
-      cog: dedupeSamples(cog),
-      sog: dedupeSamples(sog),
-      variation: dedupeSamples(variation)
+      series: {
+        heading: dedupeSamples(heading),
+        cog: dedupeSamples(cog),
+        sog: dedupeSamples(sog),
+        variation: dedupeSamples(variation)
+      },
+      segments
     }
   }
 
@@ -380,16 +395,17 @@ module.exports = function createPlugin (app) {
     const durationSeconds = Math.max((to - from) / 1000, 1)
     const coarseResolution = Math.max(30, resolutionSeconds * 30, Math.ceil(durationSeconds / 3000))
     const minSog = Number(filters.minSog || DEFAULT_OPTIONS.filters.minSog)
+    const movementDetectionSog = Math.max(0.3, Math.min(minSog, 0.8))
     const minSegmentDuration = Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration)
     const coarseSog = await provider.getSeriesChunked('navigation.speedOverGround', sources.sog, range, coarseResolution, 10000)
-    if (coarseSog.length === 0) return [range]
+    if (coarseSog.length === 0) return [await analyzeSegment(provider, sources, range, coarseResolution, filters)]
 
     const paddingMs = coarseResolution * 2000
     const segments = []
     let start = null
     let last = null
     for (const sample of coarseSog) {
-      if (sample.value >= minSog) {
+      if (sample.value >= movementDetectionSog) {
         if (start === null) start = sample.t
         last = sample.t
       } else if (start !== null) {
@@ -400,7 +416,49 @@ module.exports = function createPlugin (app) {
     }
     if (start !== null) addSegment(segments, start, last, from, to, paddingMs, minSegmentDuration)
 
-    return mergeSegments(segments, coarseResolution * 2000)
+    const merged = mergeSegments(segments, coarseResolution * 2000)
+    const analyzed = []
+    for (const segment of merged) {
+      analyzed.push(await analyzeSegment(provider, sources, segment, coarseResolution, filters))
+    }
+    return analyzed
+  }
+
+  async function analyzeSegment (provider, sources, segment, coarseResolution, filters = {}) {
+    const [sog, cog] = await Promise.all([
+      provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, coarseResolution, 10000).catch(() => []),
+      provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, coarseResolution, 10000).catch(() => [])
+    ])
+    const speeds = sog.map(sample => sample.value).filter(value => Number.isFinite(value)).sort((a, b) => a - b)
+    const cogRates = cogRatesDegPerSecond(cog).sort((a, b) => a - b)
+    const minSog = round1(clamp(percentile(speeds.filter(value => value > 0.2), 0.25) || filters.minSog || DEFAULT_OPTIONS.filters.minSog, 0.8, 3))
+    const localCogRate = round1(clamp(percentile(cogRates, 0.70) || filters.maxCogRate || DEFAULT_OPTIONS.filters.maxCogRate, 0.3, 3))
+    const medianCogRate = percentile(cogRates, 0.50) || 0
+    const p90CogRate = percentile(cogRates, 0.90) || 0
+    const durationSeconds = (new Date(segment.to).getTime() - new Date(segment.from).getTime()) / 1000
+    const quality = durationSeconds < Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration) || speeds.length < 3 || p90CogRate > 8
+      ? 'rejected'
+      : p90CogRate > 4
+        ? 'weak'
+        : 'good'
+
+    return {
+      ...segment,
+      minSog,
+      maxCogRate: localCogRate,
+      quality,
+      reason: quality === 'rejected' ? 'too short, sparse, or unstable' : null,
+      stats: {
+        durationSeconds: Math.round(durationSeconds),
+        sogMedian: round1(percentile(speeds, 0.50) || 0),
+        cogRateMedian: round1(medianCogRate),
+        cogRateP90: round1(p90CogRate),
+        samples: {
+          sog: sog.length,
+          cog: cog.length
+        }
+      }
+    }
   }
 
   function assertSources (sources) {
@@ -634,6 +692,18 @@ function dedupeSamples (samples) {
   return Array.from(byTime.values()).sort((a, b) => a.t - b.t)
 }
 
+function cogRatesDegPerSecond (samples) {
+  const rates = []
+  const sorted = dedupeSamples(samples).sort((a, b) => a.t - b.t)
+  for (let index = 1; index < sorted.length; index += 1) {
+    const dt = (sorted[index].t - sorted[index - 1].t) / 1000
+    if (dt <= 0) continue
+    const rate = Math.abs(wrap180Deg(radToDeg(sorted[index].value - sorted[index - 1].value))) / dt
+    if (Number.isFinite(rate) && rate > 0) rates.push(rate)
+  }
+  return rates
+}
+
 async function buildRecommendations (provider, discovered, range) {
   const sources = {
     heading: bestDiscoveredSource(discovered['navigation.headingMagnetic']),
@@ -667,13 +737,7 @@ async function buildRecommendations (provider, discovered, range) {
 
   if (sources.cog) {
     const cog = await provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, range, coarseResolution, 10000)
-    const cogRates = []
-    for (let index = 1; index < cog.length; index += 1) {
-      const dt = (cog[index].t - cog[index - 1].t) / 1000
-      if (dt <= 0) continue
-      cogRates.push(Math.abs(wrap180Deg(radToDeg(cog[index].value - cog[index - 1].value))) / dt)
-    }
-    const usefulRates = cogRates.filter(value => Number.isFinite(value) && value > 0).sort((a, b) => a - b)
+    const usefulRates = cogRatesDegPerSecond(cog).sort((a, b) => a - b)
     if (usefulRates.length > 0) {
       filters.maxCogRate = round1(clamp(percentile(usefulRates, 0.65), 0.5, 3))
     }

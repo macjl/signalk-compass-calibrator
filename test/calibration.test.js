@@ -81,6 +81,39 @@ test('slow samples are rejected', () => {
   assert.equal(profile.rejected.slow, 12)
 })
 
+test('segment-specific thresholds accept different movement regimes', () => {
+  const input = makeSegmentedSeries()
+  const profile = calibrate(input, {
+    filters: {
+      minSog: 2,
+      maxCogRate: 40,
+      maxSampleGapSeconds: 2,
+      minSamplesPerBin: 1,
+      binSize: 30,
+      segments: [
+        {
+          from: new Date(input.segmentStartA).toISOString(),
+          to: new Date(input.segmentEndA).toISOString(),
+          minSog: 1,
+          maxCogRate: 40,
+          quality: 'good'
+        },
+        {
+          from: new Date(input.segmentStartB).toISOString(),
+          to: new Date(input.segmentEndB).toISOString(),
+          minSog: 2,
+          maxCogRate: 40,
+          quality: 'good'
+        }
+      ]
+    }
+  })
+
+  assert.equal(profile.quality.sampleCount, 24)
+  assert.equal(profile.rejected.slow, 0)
+  assert.equal(profile.rejected.unstableCog, 0)
+})
+
 function makeSeries ({ headingOffsetDeg = 0, sog = 3 }) {
   const heading = []
   const cog = []
@@ -101,5 +134,39 @@ function makeSeries ({ headingOffsetDeg = 0, sog = 3 }) {
     cog,
     sog: speedOverGround,
     variation
+  }
+}
+
+function makeSegmentedSeries () {
+  const base = Date.UTC(2026, 0, 1, 0, 0, 0)
+  const secondBase = base + 120_000
+  const heading = []
+  const cog = []
+  const speedOverGround = []
+  const variation = []
+
+  addSegmentSamples({ t0: base, sog: 1.2, heading, cog, speedOverGround, variation })
+  addSegmentSamples({ t0: secondBase, sog: 2.4, heading, cog, speedOverGround, variation })
+
+  return {
+    heading,
+    cog,
+    sog: speedOverGround,
+    variation,
+    segmentStartA: base,
+    segmentEndA: base + 11_000,
+    segmentStartB: secondBase,
+    segmentEndB: secondBase + 11_000
+  }
+}
+
+function addSegmentSamples ({ t0, sog, heading, cog, speedOverGround, variation }) {
+  for (let index = 0; index < 12; index += 1) {
+    const headingDeg = index * 30
+    const t = t0 + index * 1000
+    heading.push({ t, value: degToRad(headingDeg + 2) })
+    cog.push({ t, value: degToRad(headingDeg) })
+    speedOverGround.push({ t, value: sog })
+    variation.push({ t, value: 0 })
   }
 }
