@@ -10,6 +10,10 @@ const { createProfileStore } = require('./lib/profile-store')
 const PLUGIN_ID = 'compass-calibrator'
 const PUBLISH_SOURCE = 'signalk-compass-calibrator'
 const PUBLISH_PATH = 'navigation.headingMagnetic'
+const DISCOVERY_RESOLUTION_SECONDS = 30
+const FINE_CALIBRATION_RESOLUTION_SECONDS = 1
+const MAX_COARSE_SCAN_RESOLUTION_SECONDS = 60
+const SEGMENT_BOUNDARY_PADDING_SECONDS = 60
 
 const DEFAULT_OPTIONS = {
   enabled: true,
@@ -243,10 +247,10 @@ module.exports = function createPlugin (app) {
         'navigation.speedOverGround',
         'navigation.magneticVariation'
       ]
-      const detectedContext = await provider.detectContextFromPath('navigation.magneticVariation', range, body.resolutionSeconds || 30).catch(() => null)
+      const detectedContext = await provider.detectContextFromPath('navigation.magneticVariation', range, body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS).catch(() => null)
       if (detectedContext) provider = provider.withContext(detectedContext)
-      const result = await provider.discover(paths, range, body.resolutionSeconds || 30)
-      const diagnostics = await Promise.all(paths.map(path => provider.diagnosePath(path, range, body.resolutionSeconds || 30)))
+      const result = await provider.discover(paths, range, body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS)
+      const diagnostics = await Promise.all(paths.map(path => provider.diagnosePath(path, range, body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS)))
       const recommendations = await buildRecommendations(provider, result, range).catch(error => ({ error: error.message }))
       return {
         detectedContext,
@@ -264,8 +268,7 @@ module.exports = function createPlugin (app) {
       const sources = { ...options.sources, ...(body.sources || {}) }
       assertSources(sources)
       const filters = { ...options.filters, ...(body.filters || {}) }
-      const resolutionSeconds = body.resolutionSeconds || 1
-      const { series, segments } = await fetchCalibrationSeries(provider, sources, range, resolutionSeconds, filters)
+      const { series, segments } = await fetchCalibrationSeries(provider, sources, range, filters)
       filters.segments = segments
         .filter(segment => segment.quality !== 'rejected')
         .map(segment => ({
@@ -355,8 +358,8 @@ module.exports = function createPlugin (app) {
     })
   }
 
-  async function fetchCalibrationSeries (provider, sources, range, resolutionSeconds, filters = {}) {
-    const coarseSegments = await findUsefulSegments(provider, sources, range, resolutionSeconds, filters)
+  async function fetchCalibrationSeries (provider, sources, range, filters = {}) {
+    const coarseSegments = await findUsefulSegments(provider, sources, range, filters)
     const segments = []
     const heading = []
     const cog = []
@@ -369,12 +372,12 @@ module.exports = function createPlugin (app) {
         continue
       }
       const [segmentHeading, segmentCog, segmentSog, segmentVariation] = await Promise.all([
-        provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, resolutionSeconds),
-        provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, resolutionSeconds),
-        provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, resolutionSeconds),
-        provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, resolutionSeconds)
+        provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
+        provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
+        provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
+        provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, FINE_CALIBRATION_RESOLUTION_SECONDS)
       ])
-      const refinedSegment = analyzeSegmentSamples(segment, segmentSog, segmentCog, filters, resolutionSeconds, 'fine')
+      const refinedSegment = analyzeSegmentSamples(segment, segmentSog, segmentCog, filters, FINE_CALIBRATION_RESOLUTION_SECONDS, 'fine')
       segments.push(refinedSegment)
       if (refinedSegment.quality === 'rejected') continue
       heading.push(...segmentHeading)
@@ -394,18 +397,18 @@ module.exports = function createPlugin (app) {
     }
   }
 
-  async function findUsefulSegments (provider, sources, range, resolutionSeconds, filters = {}) {
+  async function findUsefulSegments (provider, sources, range, filters = {}) {
     const from = new Date(range.from).getTime()
     const to = new Date(range.to).getTime()
     if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) throw httpError(400, 'Invalid calibration range')
 
     const durationSeconds = Math.max((to - from) / 1000, 1)
-    const coarseResolution = Math.max(30, resolutionSeconds * 30, Math.ceil(durationSeconds / 3000))
+    const coarseResolution = Math.max(DISCOVERY_RESOLUTION_SECONDS, Math.min(MAX_COARSE_SCAN_RESOLUTION_SECONDS, Math.ceil(durationSeconds / 3000)))
     const minSog = Number(filters.minSog || DEFAULT_OPTIONS.filters.minSog)
     const movementDetectionSog = Math.max(0.3, Math.min(minSog, 0.8))
     const minSegmentDuration = Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration)
     const coarseSog = await provider.getSeriesChunked('navigation.speedOverGround', sources.sog, range, coarseResolution, 10000)
-    if (coarseSog.length === 0) return [await analyzeSegment(provider, sources, range, coarseResolution, filters)]
+    if (coarseSog.length === 0) return [analyzeSegmentSamples(range, [], [], filters, coarseResolution, 'coarse')]
 
     const paddingMs = coarseResolution * 2000
     const segments = []
@@ -422,21 +425,81 @@ module.exports = function createPlugin (app) {
       }
     }
     if (start !== null) addSegment(segments, start, last, from, to, paddingMs, minSegmentDuration)
+    if (segments.length === 0) {
+      return [{
+        from: new Date(from).toISOString(),
+        to: new Date(to).toISOString(),
+        quality: 'rejected',
+        reason: 'no SOG movement found',
+        stats: {
+          durationSeconds: Math.round(durationSeconds),
+          analysisPass: 'coarse',
+          analysisResolutionSeconds: coarseResolution,
+          samples: {
+            sog: coarseSog.length,
+            cog: 0
+          }
+        }
+      }]
+    }
 
     const merged = mergeSegments(segments, coarseResolution * 2000)
-    const analyzed = []
+    const refined = []
     for (const segment of merged) {
-      analyzed.push(await analyzeSegment(provider, sources, segment, coarseResolution, filters))
+      refined.push(await refineSegmentBoundaries(provider, sources, segment, range, movementDetectionSog, minSegmentDuration))
     }
-    return analyzed
+    return refined
   }
 
-  async function analyzeSegment (provider, sources, segment, coarseResolution, filters = {}) {
-    const [sog, cog] = await Promise.all([
-      provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, coarseResolution, 10000).catch(() => []),
-      provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, coarseResolution, 10000).catch(() => [])
-    ])
-    return analyzeSegmentSamples(segment, sog, cog, filters, coarseResolution, 'coarse')
+  async function refineSegmentBoundaries (provider, sources, segment, fullRange, movementDetectionSog, minSegmentDuration) {
+    const samples = await provider.getSeriesChunked(
+      'navigation.speedOverGround',
+      sources.sog,
+      segment,
+      FINE_CALIBRATION_RESOLUTION_SECONDS,
+      10000
+    ).catch(() => [])
+    const moving = samples.filter(sample => Number.isFinite(sample.value) && sample.value >= movementDetectionSog)
+    if (moving.length === 0) {
+      return {
+        ...segment,
+        coarseFrom: segment.from,
+        coarseTo: segment.to,
+        quality: 'rejected',
+        reason: 'no fine SOG movement found',
+        stats: { samples: { sog: samples.length, cog: 0 } }
+      }
+    }
+
+    const rangeFrom = new Date(fullRange.from).getTime()
+    const rangeTo = new Date(fullRange.to).getTime()
+    const movementFrom = moving[0].t
+    const movementTo = moving[moving.length - 1].t
+    const paddingMs = SEGMENT_BOUNDARY_PADDING_SECONDS * 1000
+    const refinedFrom = Math.max(rangeFrom, movementFrom - paddingMs)
+    const refinedTo = Math.min(rangeTo, movementTo + paddingMs)
+    const durationSeconds = (refinedTo - refinedFrom) / 1000
+
+    return {
+      ...segment,
+      coarseFrom: segment.from,
+      coarseTo: segment.to,
+      movementFrom: new Date(movementFrom).toISOString(),
+      movementTo: new Date(movementTo).toISOString(),
+      from: new Date(refinedFrom).toISOString(),
+      to: new Date(refinedTo).toISOString(),
+      boundaryResolutionSeconds: FINE_CALIBRATION_RESOLUTION_SECONDS,
+      boundaryPaddingSeconds: SEGMENT_BOUNDARY_PADDING_SECONDS,
+      quality: durationSeconds < minSegmentDuration ? 'rejected' : 'candidate',
+      reason: durationSeconds < minSegmentDuration ? 'too short after boundary refinement' : null,
+      stats: {
+        durationSeconds: Math.round(durationSeconds),
+        samples: {
+          sog: samples.length,
+          cog: 0
+        }
+      }
+    }
   }
 
   function analyzeSegmentSamples (segment, sog, cog, filters = {}, resolutionSeconds = 1, pass = 'fine') {
@@ -777,8 +840,7 @@ async function buildRecommendations (provider, discovered, range) {
   return {
     sources,
     filters,
-    calibration,
-    resolutionSeconds: durationSeconds > 7 * 86400 ? 2 : 1
+    calibration
   }
 }
 

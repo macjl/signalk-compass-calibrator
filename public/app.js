@@ -222,13 +222,13 @@ function applyRecommendations (recommendations) {
   if (recommendations.calibration) {
     setNumberIfFinite('binSize', recommendations.calibration.binSize)
   }
-  setNumberIfFinite('resolution', recommendations.resolutionSeconds)
   persistFields()
 }
 
 function setNumberIfFinite (id, nextValue) {
   if (!Number.isFinite(Number(nextValue))) return
-  document.getElementById(id).value = String(nextValue)
+  const element = document.getElementById(id)
+  if (element) element.value = String(nextValue)
 }
 
 function bestSources (sources) {
@@ -257,7 +257,6 @@ async function runCalibration () {
       from: dateValue('from'),
       to: dateValue('to')
     },
-    resolutionSeconds: numberValue('resolution'),
     sources: {
       heading: value('headingSource'),
       cog: value('cogSource'),
@@ -313,11 +312,14 @@ function renderSegmentSummary (segments) {
   return `
     <h3>Selected periods</h3>
     ${table(
-      ['From', 'To', 'Quality', 'Min SOG', 'Max COG rate', 'SOG median', 'COG rate p90', 'Samples', 'Reason'],
+      ['From', 'To', 'Moving from', 'Moving to', 'Quality', 'Fine step', 'Min SOG', 'Max COG rate', 'SOG median', 'COG rate p90', 'Samples', 'Reason'],
       segments.map(segment => [
         escapeHtml(segment.from || ''),
         escapeHtml(segment.to || ''),
+        escapeHtml(segment.movementFrom || ''),
+        escapeHtml(segment.movementTo || ''),
         `<span class="quality-${escapeHtml(segment.quality || 'missing')}">${escapeHtml(segment.quality || '')}</span>`,
+        segment.stats && segment.stats.analysisResolutionSeconds ? `${formatValue(segment.stats.analysisResolutionSeconds)} s` : '',
         `${formatValue(segment.minSog)} m/s`,
         `${formatValue(segment.maxCogRate)} deg/s`,
         `${formatValue(segment.stats && segment.stats.sogMedian)} m/s`,
@@ -534,7 +536,6 @@ function persistedFieldIds () {
     'variationSource',
     'from',
     'to',
-    'resolution',
     'minSog',
     'maxCogRate',
     'binSize',
