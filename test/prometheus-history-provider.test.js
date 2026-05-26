@@ -53,6 +53,25 @@ test('Prometheus provider reports authentication failures clearly', async () => 
   )
 })
 
+test('Prometheus provider includes HTTP error body details', async () => {
+  const provider = new PrometheusHistoryProvider({
+    baseUrl: 'http://history.example',
+    context: 'vessels.self',
+    fetch: async () => ({
+      ok: false,
+      status: 422,
+      statusText: 'Unprocessable Entity',
+      text: async () => JSON.stringify({ error: 'invalid step value' })
+    })
+  })
+
+  await assert.rejects(
+    () => provider.labelValues('source'),
+    /422 Unprocessable Entity: invalid step value/
+  )
+})
+
+
 test('Prometheus provider discovers sources from metric labels for selected context', async () => {
   const provider = new PrometheusHistoryProvider({
     baseUrl: 'http://history.example',

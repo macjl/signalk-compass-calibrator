@@ -105,6 +105,7 @@ async function discoverSources () {
     resolutionSeconds: 30
   }
   const data = await api('/api/discover', payload)
+  mirrorDiscoveryRangeToCalibration()
   applyDiscoveredContexts(data.contexts || [])
   let count = renderSources(data.paths || data)
   renderDiagnostics(data.diagnostics || [])
@@ -155,6 +156,11 @@ function renderSources (data) {
     button.addEventListener('click', () => useSource(button.dataset.path, button.dataset.source))
   })
   return rows.length
+}
+
+function mirrorDiscoveryRangeToCalibration () {
+  document.getElementById('from').value = document.getElementById('discoverFrom').value
+  document.getElementById('to').value = document.getElementById('discoverTo').value
 }
 
 function renderDiagnostics (diagnostics) {
