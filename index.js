@@ -129,6 +129,7 @@ module.exports = function createPlugin (app) {
   function subscribeToHeading () {
     const subscription = {
       context: options.context || 'vessels.self',
+      sourcePolicy: 'all',
       subscribe: [
         {
           path: PUBLISH_PATH,
