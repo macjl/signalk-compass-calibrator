@@ -105,9 +105,24 @@ async function discoverSources () {
     resolutionSeconds: 30
   }
   const data = await api('/api/discover', payload)
-  const count = renderSources(data)
+  applyDiscoveredContexts(data.contexts || [])
+  let count = renderSources(data.paths || data)
+  if (count === 0 && shouldRetryWithDiscoveredContext(payload.context, data.contexts)) {
+    payload.context = data.contexts[0]
+    document.getElementById('context').value = payload.context
+    const retry = await api('/api/discover', payload)
+    applyDiscoveredContexts(retry.contexts || data.contexts || [])
+    count = renderSources(retry.paths || retry)
+    if (count > 0) {
+      showOk(`Historical source discovery completed after switching context to ${payload.context}: ${count} source entries found.`)
+      return
+    }
+  }
   if (count === 0) {
-    showWarning('Discovery completed, but no historical samples matched these metrics, context, sources and time range. Check the context value, range, metric names, and Prometheus labels.')
+    const contextHint = data.contexts && data.contexts.length
+      ? ` Available contexts: ${data.contexts.join(', ')}.`
+      : ''
+    showWarning(`Discovery completed, but no historical samples matched these metrics, context, sources and time range.${contextHint}`)
   } else {
     showOk(`Historical source discovery completed: ${count} source entries found.`)
   }
@@ -143,6 +158,16 @@ function renderSources (data) {
 function useSource (path, source) {
   const target = sourceInputs[path]
   if (target) document.getElementById(target.inputId).value = source
+}
+
+function applyDiscoveredContexts (contexts) {
+  document.getElementById('contextOptions').innerHTML = contexts
+    .map(context => `<option value="${escapeHtml(context)}"></option>`)
+    .join('')
+}
+
+function shouldRetryWithDiscoveredContext (context, contexts) {
+  return context === 'vessels.self' && Array.isArray(contexts) && contexts.length === 1 && contexts[0] !== context
 }
 
 function populateSourcePickers (data) {

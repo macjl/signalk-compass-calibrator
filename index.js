@@ -245,7 +245,13 @@ module.exports = function createPlugin (app) {
         'navigation.magneticVariation',
         'navigation.rateOfTurn'
       ]
-      return provider.discover(paths, range, body.resolutionSeconds || 30)
+      const contexts = await provider.labelValues('context').catch(() => [])
+      const result = await provider.discover(paths, range, body.resolutionSeconds || 30)
+      return {
+        contexts,
+        selectedContext: provider.context,
+        paths: result
+      }
     }))
 
     router.post('/api/calibrate', asyncRoute(async req => {
