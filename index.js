@@ -16,7 +16,11 @@ const DEFAULT_OPTIONS = {
   prometheus: {
     baseUrl: 'http://victoriametrics:8428',
     type: 'victoriametrics',
-    auth: null
+    auth: {
+      type: 'basic',
+      username: '',
+      password: ''
+    }
   },
   context: 'vessels.self',
   metrics: DEFAULT_METRICS,
@@ -219,6 +223,14 @@ module.exports = function createPlugin (app) {
       live: Array.from(liveSources.values()),
       selected: options.sources,
       context: options.context,
+      prometheus: {
+        baseUrl: options.prometheus.baseUrl,
+        type: options.prometheus.type,
+        auth: {
+          type: options.prometheus.auth && options.prometheus.auth.type || 'basic',
+          username: options.prometheus.auth && options.prometheus.auth.username || ''
+        }
+      },
       metrics: options.metrics
     })))
 
@@ -317,7 +329,8 @@ module.exports = function createPlugin (app) {
     return new PrometheusHistoryProvider({
       baseUrl: body.baseUrl || body.prometheus && body.prometheus.baseUrl || options.prometheus.baseUrl,
       context: body.context || options.context,
-      metrics: { ...options.metrics, ...(body.metrics || {}) }
+      metrics: { ...options.metrics, ...(body.metrics || {}) },
+      auth: body.auth || body.prometheus && body.prometheus.auth || options.prometheus.auth
     })
   }
 
@@ -394,7 +407,16 @@ function buildSchema () {
         title: 'Prometheus compatible history backend',
         properties: {
           baseUrl: { type: 'string', title: 'Base URL', default: DEFAULT_OPTIONS.prometheus.baseUrl },
-          type: { type: 'string', title: 'Backend type', default: 'victoriametrics' }
+          type: { type: 'string', title: 'Backend type', default: 'victoriametrics' },
+          auth: {
+            type: 'object',
+            title: 'Authentication',
+            properties: {
+              type: { type: 'string', title: 'Type', default: 'basic', enum: ['basic'] },
+              username: { type: 'string', title: 'Username' },
+              password: { type: 'string', title: 'Password' }
+            }
+          }
         }
       },
       context: { type: 'string', title: 'Signal K context', default: 'vessels.self' },

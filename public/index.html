@@ -15,6 +15,7 @@
         </div>
         <button id="refreshRuntime" type="button">Refresh</button>
       </header>
+      <div id="message" class="message" hidden></div>
 
       <section class="panel">
         <h2>Sources</h2>
@@ -26,6 +27,14 @@
           <label>
             History backend URL
             <input id="baseUrl" value="http://victoriametrics:8428">
+          </label>
+          <label>
+            History username
+            <input id="historyUsername" autocomplete="username">
+          </label>
+          <label>
+            History password
+            <input id="historyPassword" type="password" autocomplete="current-password">
           </label>
           <label>
             Discovery from

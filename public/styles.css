@@ -89,6 +89,28 @@ h2 {
   margin-top: 14px;
 }
 
+.message {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0 0 14px;
+  background: #fbfcfb;
+}
+
+.message.error {
+  border-color: #e2b5b5;
+  background: #fff3f3;
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.message.ok {
+  border-color: #add4bf;
+  background: #f0faf4;
+  color: var(--good);
+  font-weight: 700;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));

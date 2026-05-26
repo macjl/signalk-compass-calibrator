@@ -11,17 +11,20 @@ const paths = {
 
 setDefaultDates()
 bindEvents()
-loadRuntime()
-loadSources()
+loadRuntime().catch(showError)
+loadSources().catch(showError)
 
 function bindEvents () {
-  document.getElementById('discover').addEventListener('click', discoverSources)
-  document.getElementById('calibrate').addEventListener('click', runCalibration)
-  document.getElementById('activate').addEventListener('click', activateCandidate)
-  document.getElementById('reject').addEventListener('click', rejectCandidate)
+  document.getElementById('discover').addEventListener('click', () => runAction('Discover failed', discoverSources))
+  document.getElementById('calibrate').addEventListener('click', () => runAction('Calibration failed', runCalibration))
+  document.getElementById('activate').addEventListener('click', () => runAction('Activation failed', activateCandidate))
+  document.getElementById('reject').addEventListener('click', () => runAction('Reject failed', rejectCandidate))
   document.getElementById('refreshRuntime').addEventListener('click', () => {
-    loadRuntime()
-    loadSources()
+    runAction('Refresh failed', async () => {
+      await loadRuntime()
+      await loadSources()
+      showOk('Runtime refreshed.')
+    })
   })
 }
 
@@ -45,6 +48,10 @@ function dateValue (id) {
 async function loadSources () {
   const data = await api('/api/sources')
   document.getElementById('context').value = data.context || 'vessels.self'
+  if (data.prometheus) {
+    document.getElementById('baseUrl').value = data.prometheus.baseUrl || ''
+    document.getElementById('historyUsername').value = data.prometheus.auth && data.prometheus.auth.username || ''
+  }
   if (data.selected) {
     document.getElementById('headingSource').value = data.selected.heading || ''
     document.getElementById('cogSource').value = data.selected.cog || ''
@@ -56,6 +63,7 @@ async function loadSources () {
 async function discoverSources () {
   const payload = {
     baseUrl: value('baseUrl'),
+    auth: historyAuth(),
     context: value('context'),
     range: {
       from: dateValue('discoverFrom'),
@@ -65,6 +73,7 @@ async function discoverSources () {
   }
   const data = await api('/api/discover', payload)
   renderSources(data)
+  showOk('Historical source discovery completed.')
 }
 
 function renderSources (data) {
@@ -102,6 +111,7 @@ function useSource (path, source) {
 async function runCalibration () {
   const payload = {
     baseUrl: value('baseUrl'),
+    auth: historyAuth(),
     context: value('context'),
     range: {
       from: dateValue('from'),
@@ -128,6 +138,7 @@ async function runCalibration () {
   renderProfile(candidateProfile)
   document.getElementById('activate').disabled = false
   document.getElementById('reject').disabled = false
+  showOk('Calibration completed. Review the candidate profile before activation.')
 }
 
 function renderProfile (profile) {
@@ -162,6 +173,7 @@ async function activateCandidate () {
   candidateProfile = await api(`/api/profiles/${encodeURIComponent(candidateProfile.id)}/activate`, {})
   renderProfile(candidateProfile)
   await loadRuntime()
+  showOk('Candidate profile activated.')
 }
 
 async function rejectCandidate () {
@@ -170,6 +182,7 @@ async function rejectCandidate () {
   renderProfile(candidateProfile)
   document.getElementById('activate').disabled = true
   document.getElementById('reject').disabled = true
+  showOk('Candidate profile rejected.')
 }
 
 async function loadRuntime () {
@@ -199,9 +212,63 @@ async function api (url, body) {
         body: JSON.stringify(body)
       }
   const response = await fetch(requestUrl, options)
-  const payload = await response.json()
-  if (!response.ok) throw new Error(payload.error || response.statusText)
+  const payload = await parseResponse(response)
+  if (!response.ok) throw new Error(payload.error || `${response.status} ${response.statusText}`)
   return payload
+}
+
+async function parseResponse (response) {
+  const text = await response.text()
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    return {
+      error: `${response.status} ${response.statusText}: ${text.slice(0, 240)}`
+    }
+  }
+}
+
+async function runAction (fallback, action) {
+  clearMessage()
+  try {
+    await action()
+  } catch (error) {
+    showError(error, fallback)
+  }
+}
+
+function historyAuth () {
+  const username = value('historyUsername')
+  const password = value('historyPassword')
+  if (!username && !password) return null
+  return {
+    type: 'basic',
+    username,
+    password
+  }
+}
+
+function showOk (message) {
+  showMessage(message, 'ok')
+}
+
+function showError (error, fallback = 'Request failed') {
+  showMessage(`${fallback}: ${error.message || error}`, 'error')
+}
+
+function showMessage (message, type) {
+  const element = document.getElementById('message')
+  element.hidden = false
+  element.className = `message ${type}`
+  element.textContent = message
+}
+
+function clearMessage () {
+  const element = document.getElementById('message')
+  element.hidden = true
+  element.className = 'message'
+  element.textContent = ''
 }
 
 function drawPlot (profile) {
