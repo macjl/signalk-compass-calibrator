@@ -1,6 +1,10 @@
 'use strict'
 
 let candidateProfile = null
+let restoredFields = new Set()
+
+const STORAGE_KEY = 'signalk-compass-calibrator.settings.v1'
+const SECRET_STORAGE_KEY = 'signalk-compass-calibrator.sessionSecrets.v1'
 
 const paths = {
   heading: 'navigation.headingMagnetic',
@@ -41,11 +45,13 @@ const metricInputs = {
 }
 
 setDefaultDates()
+restorePersistedFields()
 bindEvents()
 loadRuntime().catch(showError)
 loadSources().catch(showError)
 
 function bindEvents () {
+  bindPersistence()
   document.getElementById('discover').addEventListener('click', () => runAction('Discover failed', discoverSources))
   document.getElementById('calibrate').addEventListener('click', () => runAction('Calibration failed', runCalibration))
   document.getElementById('activate').addEventListener('click', () => runAction('Activation failed', activateCandidate))
@@ -78,17 +84,17 @@ function dateValue (id) {
 
 async function loadSources () {
   const data = await api('/api/sources')
-  document.getElementById('context').value = data.context || 'vessels.self'
+  setIfNotRestored('context', data.context || 'vessels.self')
   if (data.prometheus) {
-    document.getElementById('baseUrl').value = data.prometheus.baseUrl || ''
-    document.getElementById('historyUsername').value = data.prometheus.auth && data.prometheus.auth.username || ''
+    setIfNotRestored('baseUrl', data.prometheus.baseUrl || '')
+    setIfNotRestored('historyUsername', data.prometheus.auth && data.prometheus.auth.username || '')
   }
-  if (data.metrics) setMetricInputs(data.metrics)
+  if (data.metrics) setMetricInputs(data.metrics, true)
   if (data.selected) {
-    document.getElementById('headingSource').value = data.selected.heading || ''
-    document.getElementById('cogSource').value = data.selected.cog || ''
-    document.getElementById('sogSource').value = data.selected.sog || ''
-    document.getElementById('variationSource').value = data.selected.variation || ''
+    setIfNotRestored('headingSource', data.selected.heading || '')
+    setIfNotRestored('cogSource', data.selected.cog || '')
+    setIfNotRestored('sogSource', data.selected.sog || '')
+    setIfNotRestored('variationSource', data.selected.variation || '')
   }
 }
 
@@ -112,6 +118,7 @@ async function discoverSources () {
   if (count === 0 && shouldRetryWithDiscoveredContext(payload.context, data.contexts)) {
     payload.context = data.contexts[0]
     document.getElementById('context').value = payload.context
+    persistFields()
     const retry = await api('/api/discover', payload)
     applyDiscoveredContexts(retry.contexts || data.contexts || [])
     count = renderSources(retry.paths || retry)
@@ -161,6 +168,7 @@ function renderSources (data) {
 function mirrorDiscoveryRangeToCalibration () {
   document.getElementById('from').value = document.getElementById('discoverFrom').value
   document.getElementById('to').value = document.getElementById('discoverTo').value
+  persistFields()
 }
 
 function renderDiagnostics (diagnostics) {
@@ -189,7 +197,10 @@ function renderDiagnostics (diagnostics) {
 
 function useSource (path, source) {
   const target = sourceInputs[path]
-  if (target) document.getElementById(target.inputId).value = source
+  if (target) {
+    document.getElementById(target.inputId).value = source
+    persistFields()
+  }
 }
 
 function applyDiscoveredContexts (contexts) {
@@ -213,6 +224,7 @@ function populateSourcePickers (data) {
     const input = document.getElementById(target.inputId)
     if (!input.value && unique.length > 0) {
       input.value = unique[0].source
+      persistFields()
     }
   }
 }
@@ -381,9 +393,12 @@ function metricValues () {
   )
 }
 
-function setMetricInputs (metrics) {
+function setMetricInputs (metrics, keepRestored = false) {
   for (const [key, id] of Object.entries(metricInputs)) {
-    if (metrics[key]) document.getElementById(id).value = metrics[key]
+    if (metrics[key]) {
+      if (keepRestored) setIfNotRestored(id, metrics[key])
+      else document.getElementById(id).value = metrics[key]
+    }
   }
 }
 
@@ -472,6 +487,82 @@ function metric (label, value) {
 
 function value (id) {
   return document.getElementById(id).value.trim()
+}
+
+function bindPersistence () {
+  for (const id of persistedFieldIds()) {
+    const element = document.getElementById(id)
+    if (!element) continue
+    element.addEventListener('input', persistFields)
+    element.addEventListener('change', persistFields)
+  }
+}
+
+function persistedFieldIds () {
+  return [
+    'context',
+    'baseUrl',
+    'historyUsername',
+    'discoverFrom',
+    'discoverTo',
+    'headingSource',
+    'cogSource',
+    'sogSource',
+    'variationSource',
+    'from',
+    'to',
+    'resolution',
+    'minSog',
+    'maxRateOfTurn',
+    'maxCogRate',
+    'binSize',
+    'minSamplesPerBin',
+    ...Object.values(metricInputs)
+  ]
+}
+
+function restorePersistedFields () {
+  const values = readStoredJson(localStorage, STORAGE_KEY)
+  restoredFields = new Set()
+  for (const [id, fieldValue] of Object.entries(values)) {
+    const element = document.getElementById(id)
+    if (!element || fieldValue === undefined || fieldValue === null) continue
+    element.value = fieldValue
+    restoredFields.add(id)
+  }
+
+  const secrets = readStoredJson(sessionStorage, SECRET_STORAGE_KEY)
+  if (secrets.historyPassword) {
+    const password = document.getElementById('historyPassword')
+    password.value = secrets.historyPassword
+    restoredFields.add('historyPassword')
+  }
+}
+
+function persistFields () {
+  const values = {}
+  for (const id of persistedFieldIds()) {
+    const element = document.getElementById(id)
+    if (element) values[id] = element.value
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(values))
+  sessionStorage.setItem(SECRET_STORAGE_KEY, JSON.stringify({
+    historyPassword: document.getElementById('historyPassword').value
+  }))
+}
+
+function readStoredJson (storage, key) {
+  try {
+    return JSON.parse(storage.getItem(key) || '{}')
+  } catch (error) {
+    return {}
+  }
+}
+
+function setIfNotRestored (id, nextValue) {
+  if (restoredFields.has(id)) return
+  const element = document.getElementById(id)
+  if (element) element.value = nextValue
 }
 
 function numberValue (id) {
