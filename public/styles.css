@@ -76,6 +76,16 @@ h2 {
   margin-bottom: 14px;
 }
 
+h3 {
+  font-size: 15px;
+  margin: 16px 0 8px;
+}
+
+code {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
 .topbar p,
 .muted {
   color: var(--muted);

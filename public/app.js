@@ -107,12 +107,14 @@ async function discoverSources () {
   const data = await api('/api/discover', payload)
   applyDiscoveredContexts(data.contexts || [])
   let count = renderSources(data.paths || data)
+  renderDiagnostics(data.diagnostics || [])
   if (count === 0 && shouldRetryWithDiscoveredContext(payload.context, data.contexts)) {
     payload.context = data.contexts[0]
     document.getElementById('context').value = payload.context
     const retry = await api('/api/discover', payload)
     applyDiscoveredContexts(retry.contexts || data.contexts || [])
     count = renderSources(retry.paths || retry)
+    renderDiagnostics(retry.diagnostics || data.diagnostics || [])
     if (count > 0) {
       showOk(`Historical source discovery completed after switching context to ${payload.context}: ${count} source entries found.`)
       return
@@ -153,6 +155,30 @@ function renderSources (data) {
     button.addEventListener('click', () => useSource(button.dataset.path, button.dataset.source))
   })
   return rows.length
+}
+
+function renderDiagnostics (diagnostics) {
+  if (!diagnostics.length) {
+    document.getElementById('diagnostics').innerHTML = ''
+    return
+  }
+  document.getElementById('diagnostics').innerHTML = `
+    <h3>Discovery diagnostics</h3>
+    ${table(
+      ['Path', 'Metric', 'Selector', 'Instant series', 'Range series', 'Samples', 'Contexts', 'Sources for selected context', 'Error'],
+      diagnostics.map(item => [
+        escapeHtml(item.path),
+        escapeHtml(item.metric),
+        `<code>${escapeHtml(item.selector)}</code>`,
+        item.metricSeriesCount,
+        item.rangeSeriesCount,
+        item.rangeSampleCount,
+        escapeHtml((item.contexts || []).join(', ')),
+        escapeHtml((item.sourcesForSelectedContext || []).join(', ')),
+        item.error ? `<span class="error">${escapeHtml(item.error)}</span>` : ''
+      ])
+    )}
+  `
 }
 
 function useSource (path, source) {

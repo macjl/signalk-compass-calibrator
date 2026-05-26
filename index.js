@@ -247,10 +247,12 @@ module.exports = function createPlugin (app) {
       ]
       const contexts = await provider.labelValues('context').catch(() => [])
       const result = await provider.discover(paths, range, body.resolutionSeconds || 30)
+      const diagnostics = await Promise.all(paths.map(path => provider.diagnosePath(path, range, body.resolutionSeconds || 30)))
       return {
         contexts,
         selectedContext: provider.context,
-        paths: result
+        paths: result,
+        diagnostics
       }
     }))
 
