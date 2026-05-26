@@ -99,6 +99,31 @@ code {
   margin-top: 14px;
 }
 
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tabButton {
+  background: #e8eeea;
+  color: var(--text);
+}
+
+.tabButton.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.tabPanel {
+  display: none;
+}
+
+.tabPanel.active {
+  display: block;
+}
+
 .message {
   border: 1px solid var(--line);
   border-radius: 6px;

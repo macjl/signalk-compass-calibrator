@@ -160,7 +160,7 @@ module.exports = function createPlugin (app) {
     for (const update of delta.updates || []) {
       const source = update.$source || update.source && update.source.label
       if (!source || source === options.publishing.source) continue
-      if (!activeRuntimeProfile) recordLiveSource(source, update.values || [])
+      recordLiveSource(source, update.values || [])
 
       const configuredSource = getRuntimeInputSource()
       if (!configuredSource || source !== configuredSource) continue
@@ -291,14 +291,21 @@ module.exports = function createPlugin (app) {
         calibration: { ...options.calibration, ...(body.calibration || {}) }
       })
       profile.segments = segments
-      store.upsert(profile)
       return profile
     }))
 
     router.get('/api/profiles', asyncRoute(async () => ({
       activeProfileId: store.active() ? store.active().id : null,
+      activeInputSource: store.activeInputSource(),
       profiles: store.list().map(profileSummary)
     })))
+
+    router.post('/api/profiles', asyncRoute(async req => {
+      const body = await readBody(req)
+      const profile = body.profile || body
+      if (!compileCalibrationProfile(profile)) throw httpError(400, 'Profile has no usable runtime correction table')
+      return store.saveProfile(profile)
+    }))
 
     router.get('/api/profiles/:id', asyncRoute(async req => {
       const profile = store.get(req.params.id)
@@ -347,10 +354,33 @@ module.exports = function createPlugin (app) {
     router.get('/api/runtime', asyncRoute(async () => ({
       ...runtime,
       activeProfile: activeProfile ? profileSummary(activeProfile) : null,
+      activeInputSource: getRuntimeInputSource(),
+      profiles: store.list().map(profileSummary),
+      liveSources: Array.from(liveSources.values()),
       lastRawHeadingDeg: runtime.lastRawHeading === null ? null : radToDeg(runtime.lastRawHeading),
       lastCorrectionDeg: runtime.lastCorrection === null ? null : radToDeg(runtime.lastCorrection),
       lastCalibratedHeadingDeg: runtime.lastCalibratedHeading === null ? null : radToDeg(runtime.lastCalibratedHeading)
     })))
+
+    router.post('/api/runtime/config', asyncRoute(async req => {
+      const body = await readBody(req)
+      const profileId = body.profileId || null
+      const inputSource = body.inputSource || null
+      if (!profileId) throw httpError(400, 'Missing calibration table')
+      if (!inputSource) throw httpError(400, 'Missing Signal K input source')
+      const profile = store.get(profileId)
+      if (!profile) throw httpError(404, 'Profile not found')
+      if (!compileCalibrationProfile(profile)) throw httpError(400, 'Profile has no usable runtime correction table')
+      store.configureRuntime(profileId, inputSource)
+      setActiveProfile(profile)
+      runtime.status = statusFromState()
+      setPluginStatus()
+      return {
+        ...runtime,
+        activeProfile: profileSummary(profile),
+        activeInputSource: getRuntimeInputSource()
+      }
+    }))
   }
 
   function makeProvider (body = {}) {
@@ -633,7 +663,7 @@ module.exports = function createPlugin (app) {
   }
 
   function getRuntimeInputSource () {
-    return options.sources.heading || activeRuntimeProfile && activeRuntimeProfile.source || activeProfile && activeProfile.sources && activeProfile.sources.heading
+    return store && store.activeInputSource() || options.sources.heading || activeRuntimeProfile && activeRuntimeProfile.source || activeProfile && activeProfile.sources && activeProfile.sources.heading
   }
 
   function setActiveProfile (profile) {
@@ -1027,6 +1057,8 @@ function profileSummary (profile) {
   return {
     id: profile.id,
     createdAt: profile.createdAt,
+    savedAt: profile.savedAt || null,
+    displayName: profile.displayName || profile.savedAt || profile.createdAt,
     state: profile.state,
     range: profile.range,
     sources: profile.sources,

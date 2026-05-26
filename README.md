@@ -15,7 +15,7 @@ The calibration step uses a Prometheus-compatible history backend such as Victor
 - Discover historical sources through Prometheus/VictoriaMetrics labels.
 - Run explicit batch calibration over a selected time range, with coarse preselection of useful moving periods, 1-second boundary refinement, and stable COG sub-segment selection.
 - Review timelines, zoomed navigation periods, radial heading coverage, correction bins, adaptive per-period thresholds, quality metrics, warnings, and a labelled correction plot.
-- Save, reject, archive, or activate profiles.
+- Save or discard candidate tables, view/delete saved tables, and select the runtime table and live Signal K input source separately.
 - Publish only the corrected heading at runtime on `navigation.headingMagnetic`.
 - Avoid feedback loops by ignoring the plugin's own Signal K source.
 

@@ -17,6 +17,13 @@
       </header>
       <div id="message" class="message" hidden></div>
 
+      <nav class="tabs" aria-label="Main sections">
+        <button class="tabButton active" type="button" data-tab="calibrationTab">Calibration</button>
+        <button class="tabButton" type="button" data-tab="calibrationsTab">Calibrations</button>
+        <button class="tabButton" type="button" data-tab="runtimeTab">Runtime</button>
+      </nav>
+
+      <section id="calibrationTab" class="tabPanel active">
       <section class="panel">
         <h2>Sources</h2>
         <div class="grid">
@@ -133,19 +140,54 @@
       </section>
 
       <section class="panel">
-        <h2>Profile Review</h2>
+        <h2>Candidate Review</h2>
         <div id="candidate" class="summary muted">No candidate profile yet.</div>
         <canvas id="plot" width="720" height="260"></canvas>
         <div id="table" class="tableWrap"></div>
         <div class="actions">
-          <button id="activate" type="button" disabled>Activate candidate</button>
-          <button id="reject" type="button" disabled>Reject candidate</button>
+          <button id="saveCandidate" type="button" disabled>Save table</button>
+          <button id="cancelCandidate" type="button" disabled>Cancel</button>
         </div>
       </section>
+      </section>
 
+      <section id="calibrationsTab" class="tabPanel">
+        <section class="panel">
+          <h2>Saved Calibrations</h2>
+          <div id="profilesList" class="tableWrap muted">No saved calibration loaded.</div>
+        </section>
+        <section class="panel">
+          <h2>Calibration Details</h2>
+          <div id="savedProfile" class="summary muted">Select a calibration table.</div>
+          <canvas id="savedPlot" width="720" height="260"></canvas>
+          <div id="savedTable" class="tableWrap"></div>
+          <div class="actions">
+            <button id="deleteProfile" type="button" disabled>Delete table</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="runtimeTab" class="tabPanel">
       <section class="panel">
-        <h2>Runtime</h2>
+        <h2>Runtime Selection</h2>
+        <div class="grid">
+          <label>
+            Calibration table
+            <select id="runtimeProfile"></select>
+          </label>
+          <label>
+            Signal K input source
+            <select id="runtimeSource"></select>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="activateRuntime" type="button">Activate runtime calibration</button>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Runtime Status</h2>
         <div id="runtime" class="summary muted">Runtime not loaded.</div>
+      </section>
       </section>
     </main>
 

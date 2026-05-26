@@ -2,6 +2,8 @@
 
 let candidateProfile = null
 let restoredFields = new Set()
+let savedProfiles = []
+let selectedProfile = null
 
 const STORAGE_KEY = 'signalk-compass-calibrator.settings.v2'
 const SECRET_STORAGE_KEY = 'signalk-compass-calibrator.sessionSecrets.v1'
@@ -45,20 +47,53 @@ restorePersistedFields()
 bindEvents()
 loadRuntime().catch(showError)
 loadSources().catch(showError)
+loadProfiles().catch(showError)
 
 function bindEvents () {
   bindPersistence()
+  bindTabs()
   document.getElementById('discover').addEventListener('click', () => runAction('Discover failed', discoverSources))
   document.getElementById('calibrate').addEventListener('click', () => runAction('Calibration failed', runCalibration))
-  document.getElementById('activate').addEventListener('click', () => runAction('Activation failed', activateCandidate))
-  document.getElementById('reject').addEventListener('click', () => runAction('Reject failed', rejectCandidate))
+  document.getElementById('saveCandidate').addEventListener('click', () => runAction('Save failed', saveCandidate))
+  document.getElementById('cancelCandidate').addEventListener('click', cancelCandidate)
+  document.getElementById('profilesList').addEventListener('click', event => {
+    const action = event.target && event.target.dataset && event.target.dataset.action
+    const id = event.target && event.target.dataset && event.target.dataset.id
+    if (action === 'view' && id) runAction('Load failed', () => loadProfileDetails(id))
+  })
+  document.getElementById('deleteProfile').addEventListener('click', () => runAction('Delete failed', deleteSelectedProfile))
+  document.getElementById('activateRuntime').addEventListener('click', () => runAction('Runtime activation failed', activateRuntime))
   document.getElementById('refreshRuntime').addEventListener('click', () => {
     runAction('Refresh failed', async () => {
+      await loadProfiles()
       await loadRuntime()
       await loadSources()
       showOk('Runtime refreshed.')
     })
   })
+}
+
+function bindTabs () {
+  document.querySelectorAll('.tabButton').forEach(button => {
+    button.addEventListener('click', () => showTab(button.dataset.tab))
+  })
+}
+
+function showTab (id) {
+  document.querySelectorAll('.tabButton').forEach(button => {
+    button.classList.toggle('active', button.dataset.tab === id)
+  })
+  document.querySelectorAll('.tabPanel').forEach(panel => {
+    panel.classList.toggle('active', panel.id === id)
+  })
+  if (id === 'calibrationsTab') runAction('Load calibrations failed', loadProfiles)
+  if (id === 'runtimeTab') {
+    runAction('Load runtime failed', async () => {
+      await loadProfiles()
+      await loadRuntime()
+      await loadSources()
+    })
+  }
 }
 
 function setDefaultDates () {
@@ -92,6 +127,14 @@ async function loadSources () {
     setIfNotRestored('sogSource', data.selected.sog || '')
     setIfNotRestored('variationSource', data.selected.variation || '')
   }
+  populateRuntimeSources(data.live || [])
+}
+
+async function loadProfiles () {
+  const data = await api('/api/profiles')
+  savedProfiles = data.profiles || []
+  renderProfilesList(savedProfiles, data.activeProfileId)
+  populateRuntimeProfiles(savedProfiles, data.activeProfileId)
 }
 
 async function discoverSources () {
@@ -280,13 +323,41 @@ async function runCalibration () {
   }
   candidateProfile = await api('/api/calibrate', payload)
   renderProfile(candidateProfile)
-  document.getElementById('activate').disabled = false
-  document.getElementById('reject').disabled = false
-  showOk('Calibration completed. Review the candidate profile before activation.')
+  document.getElementById('saveCandidate').disabled = false
+  document.getElementById('cancelCandidate').disabled = false
+  showOk('Calibration completed. Save the table or cancel it.')
 }
 
-function renderProfile (profile) {
-  document.getElementById('candidate').innerHTML = `
+async function saveCandidate () {
+  if (!candidateProfile) return
+  const saved = await api('/api/profiles', { profile: candidateProfile })
+  candidateProfile = null
+  resetCandidateReview()
+  await loadProfiles()
+  showTab('calibrationsTab')
+  await loadProfileDetails(saved.id)
+  showOk('Calibration table saved.')
+}
+
+function cancelCandidate () {
+  candidateProfile = null
+  resetCandidateReview()
+  showTab('calibrationTab')
+  showOk('Candidate calibration discarded.')
+}
+
+function resetCandidateReview () {
+  document.getElementById('candidate').innerHTML = 'No candidate profile yet.'
+  document.getElementById('candidate').className = 'summary muted'
+  document.getElementById('table').innerHTML = ''
+  clearCanvas('plot')
+  document.getElementById('saveCandidate').disabled = true
+  document.getElementById('cancelCandidate').disabled = true
+}
+
+function renderProfile (profile, target = 'candidate') {
+  const ids = profileTargetIds(target)
+  document.getElementById(ids.summary).innerHTML = `
     <div class="summaryGrid">
       ${metric('State', profile.state)}
       ${metric('Samples', profile.quality.sampleCount)}
@@ -296,11 +367,12 @@ function renderProfile (profile) {
       ${metric('Stddev', `${formatValue(profile.quality.stddevDeg)} deg`)}
     </div>
     ${profile.warnings && profile.warnings.length ? `<p class="warning">${profile.warnings.map(escapeHtml).join('<br>')}</p>` : ''}
-    ${renderCalibrationTimeline(profile)}
+    ${renderCalibrationTimeline(profile, target)}
     ${renderSegmentSummary(profile.segments || [])}
   `
-  drawCoverageRose('globalCoverage', binsFromCorrectionTable(profile.correctionTable || []), numberValue('minSamplesPerBin'))
-  document.getElementById('table').innerHTML = table(
+  document.getElementById(ids.summary).className = 'summary'
+  drawCoverageRose(`${target}GlobalCoverage`, binsFromCorrectionTable(profile.correctionTable || []), numberValue('minSamplesPerBin'))
+  document.getElementById(ids.table).innerHTML = table(
     ['Heading', 'Correction', 'Samples', 'Mean error', 'Stddev', 'Quality', 'Interpolated'],
     profile.correctionTable.map(bin => [
       `${bin.headingDeg} deg`,
@@ -312,8 +384,13 @@ function renderProfile (profile) {
       bin.interpolated ? 'yes' : ''
     ])
   )
-  drawPlot(profile)
-  drawNavigationCoverageRoses(profile.segments || [])
+  drawPlot(profile, ids.plot)
+  drawNavigationCoverageRoses(profile.segments || [], target)
+}
+
+function profileTargetIds (target) {
+  if (target === 'saved') return { summary: 'savedProfile', plot: 'savedPlot', table: 'savedTable' }
+  return { summary: 'candidate', plot: 'plot', table: 'table' }
 }
 
 function renderSegmentSummary (segments) {
@@ -341,7 +418,7 @@ function renderSegmentSummary (segments) {
   `
 }
 
-function renderCalibrationTimeline (profile) {
+function renderCalibrationTimeline (profile, target = 'candidate') {
   const segments = profile.segments || []
   if (!segments.length || !profile.range) return ''
   const range = normalizeRange(profile.range)
@@ -351,7 +428,7 @@ function renderCalibrationTimeline (profile) {
     <div class="coveragePanel">
       <div>
         <h4>Heading coverage</h4>
-        <canvas id="globalCoverage" class="coverageRose" width="260" height="260"></canvas>
+        <canvas id="${target}GlobalCoverage" class="coverageRose" width="260" height="260"></canvas>
       </div>
       <div class="coverageNotes">
         <p>Radial fill shows samples per heading bin against the minimum samples per bin.</p>
@@ -373,12 +450,12 @@ function renderCalibrationTimeline (profile) {
       ${segments.flatMap(segment => segment.stableSegments || []).map(segment => timelineBlock(segment, range, 'stable')).join('')}
     </div>
     <div class="periodZooms">
-      ${segments.map((segment, index) => renderNavigationZoom(segment, index)).join('')}
+      ${segments.map((segment, index) => renderNavigationZoom(segment, index, target)).join('')}
     </div>
   `
 }
 
-function renderNavigationZoom (segment, index) {
+function renderNavigationZoom (segment, index, target = 'candidate') {
   const range = normalizeRange(segment)
   if (!range) return ''
   const stableSegments = segment.stableSegments || []
@@ -407,7 +484,7 @@ function renderNavigationZoom (segment, index) {
         ${metric('COG p90', `${formatValue(segment.stats && segment.stats.cogRateP90)} deg/s`)}
         ${metric('Heading coverage', `${coverageDeg} deg`)}
       </div>
-      <canvas id="coverage-${index}" class="coverageRose small" width="180" height="180"></canvas>
+      <canvas id="${target}-coverage-${index}" class="coverageRose small" width="180" height="180"></canvas>
     </details>
   `
 }
@@ -420,30 +497,17 @@ function timelineBlock (segment, range, type) {
   return `<span class="timelineBlock ${type}" style="left:${left}%;width:${width}%" title="${escapeHtml(formatDateTime(segmentRange.from))} - ${escapeHtml(formatDateTime(segmentRange.to))}"></span>`
 }
 
-async function activateCandidate () {
-  if (!candidateProfile) return
-  candidateProfile = await api(`/api/profiles/${encodeURIComponent(candidateProfile.id)}/activate`, {})
-  renderProfile(candidateProfile)
-  await loadRuntime()
-  showOk('Candidate profile activated.')
-}
-
-async function rejectCandidate () {
-  if (!candidateProfile) return
-  candidateProfile = await api(`/api/profiles/${encodeURIComponent(candidateProfile.id)}/reject`, {})
-  renderProfile(candidateProfile)
-  document.getElementById('activate').disabled = true
-  document.getElementById('reject').disabled = true
-  showOk('Candidate profile rejected.')
-}
-
 async function loadRuntime () {
   const data = await api('/api/runtime')
+  populateRuntimeProfiles(data.profiles || savedProfiles, data.activeProfileId)
+  populateRuntimeSources(data.liveSources || [], data.activeInputSource)
+  if (data.activeProfileId) document.getElementById('runtimeProfile').value = data.activeProfileId
+  if (data.activeInputSource) document.getElementById('runtimeSource').value = data.activeInputSource
   document.getElementById('runtime').innerHTML = `
     <div class="summaryGrid">
       ${metric('Status', data.status)}
       ${metric('Active profile', data.activeProfileId || 'none')}
-      ${metric('Input source', data.inputSource || 'none')}
+      ${metric('Input source', data.activeInputSource || data.inputSource || 'none')}
       ${metric('Raw heading', `${formatValue(data.lastRawHeadingDeg)} deg`)}
       ${metric('Correction', `${formatValue(data.lastCorrectionDeg)} deg`)}
       ${metric('Calibrated', `${formatValue(data.lastCalibratedHeadingDeg)} deg`)}
@@ -453,13 +517,84 @@ async function loadRuntime () {
   `
 }
 
-async function api (url, body) {
+async function activateRuntime () {
+  const profileId = value('runtimeProfile')
+  const inputSource = value('runtimeSource')
+  await api('/api/runtime/config', { profileId, inputSource })
+  await loadRuntime()
+  showOk('Runtime calibration activated.')
+}
+
+function renderProfilesList (profiles, activeProfileId) {
+  document.getElementById('profilesList').innerHTML = table(
+    ['Saved at', 'State', 'Samples', 'Coverage', 'Stddev', 'Action'],
+    profiles.map(profile => [
+      escapeHtml(profile.displayName || profile.savedAt || profile.createdAt || profile.id),
+      profile.id === activeProfileId ? 'runtime active' : escapeHtml(profile.state || 'saved'),
+      profile.quality ? profile.quality.sampleCount : '',
+      profile.quality ? `${formatValue(profile.quality.coverageDeg)} deg` : '',
+      profile.quality ? `${formatValue(profile.quality.stddevDeg)} deg` : '',
+      `<button type="button" data-action="view" data-id="${escapeHtml(profile.id)}">View</button>`
+    ])
+  )
+}
+
+async function loadProfileDetails (id) {
+  selectedProfile = await api(`/api/profiles/${encodeURIComponent(id)}`)
+  renderProfile(selectedProfile, 'saved')
+  document.getElementById('deleteProfile').disabled = false
+}
+
+async function deleteSelectedProfile () {
+  if (!selectedProfile) return
+  await api(`/api/profiles/${encodeURIComponent(selectedProfile.id)}`, undefined, 'DELETE')
+  selectedProfile = null
+  document.getElementById('savedProfile').innerHTML = 'Select a calibration table.'
+  document.getElementById('savedProfile').className = 'summary muted'
+  document.getElementById('savedTable').innerHTML = ''
+  clearCanvas('savedPlot')
+  document.getElementById('deleteProfile').disabled = true
+  await loadProfiles()
+  await loadRuntime()
+  showOk('Calibration table deleted.')
+}
+
+function populateRuntimeProfiles (profiles, activeProfileId) {
+  const select = document.getElementById('runtimeProfile')
+  if (!select) return
+  const previous = select.value || activeProfileId || ''
+  select.innerHTML = [
+    '<option value="">Select table</option>',
+    ...profiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.displayName || profile.savedAt || profile.createdAt || profile.id)}</option>`)
+  ].join('')
+  if (previous) select.value = previous
+}
+
+function populateRuntimeSources (sources, selectedSource = '') {
+  const select = document.getElementById('runtimeSource')
+  if (!select) return
+  const headingSources = Array.from(new Set([
+    ...(sources || [])
+    .filter(source => source.paths && source.paths[paths.heading])
+    .map(source => source.source)
+    .filter(Boolean),
+    selectedSource
+  ].filter(Boolean))).sort()
+  const previous = select.value || selectedSource
+  select.innerHTML = [
+    '<option value="">Select Signal K source</option>',
+    ...headingSources.map(source => `<option value="${escapeHtml(source)}">${escapeHtml(source)}</option>`)
+  ].join('')
+  if (previous && headingSources.includes(previous)) select.value = previous
+}
+
+async function api (url, body, method) {
   const endpoint = url.replace(/^\/+/, '')
   const requestUrl = new URL(endpoint, `${window.location.origin}/plugins/compass-calibrator/`)
   const options = body === undefined
-    ? {}
+    ? (method ? { method } : {})
     : {
-        method: 'POST',
+        method: method || 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body)
       }
@@ -542,8 +677,15 @@ function clearMessage () {
   element.textContent = ''
 }
 
-function drawPlot (profile) {
-  const canvas = document.getElementById('plot')
+function clearCanvas (id) {
+  const canvas = document.getElementById(id)
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+}
+
+function drawPlot (profile, canvasId = 'plot') {
+  const canvas = document.getElementById(canvasId)
   const ctx = canvas.getContext('2d')
   const width = canvas.width
   const height = canvas.height
@@ -616,9 +758,9 @@ function drawPlot (profile) {
   }
 }
 
-function drawNavigationCoverageRoses (segments) {
+function drawNavigationCoverageRoses (segments, target = 'candidate') {
   segments.forEach((segment, index) => {
-    drawCoverageRose(`coverage-${index}`, segment.headingBins || [], numberValue('minSamplesPerBin'))
+    drawCoverageRose(`${target}-coverage-${index}`, segment.headingBins || [], numberValue('minSamplesPerBin'))
   })
 }
 
