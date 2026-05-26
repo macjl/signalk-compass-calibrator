@@ -115,6 +115,34 @@ test('Prometheus provider discovers sources from metric labels for selected cont
   assert.equal(sources[0].sampleCount, 2)
 })
 
+test('Prometheus provider chunks long range queries', async () => {
+  const starts = []
+  const provider = new PrometheusHistoryProvider({
+    baseUrl: 'http://history.example',
+    context: 'vessels.self',
+    fetch: async url => {
+      const parsed = new URL(url)
+      starts.push(parsed.searchParams.get('start'))
+      return jsonResponse({
+        status: 'success',
+        data: {
+          result: [
+            { values: [[Number(parsed.searchParams.get('start')), '1']] }
+          ]
+        }
+      })
+    }
+  })
+
+  const samples = await provider.getSeriesChunked('navigation.headingMagnetic', 'heading-a', {
+    from: '2026-05-25T00:00:00Z',
+    to: '2026-05-25T00:00:09Z'
+  }, 1, 3)
+
+  assert.deepEqual(starts, ['1779667200', '1779667203', '1779667206', '1779667209'])
+  assert.equal(samples.length, 4)
+})
+
 function jsonResponse (body) {
   return {
     ok: true,

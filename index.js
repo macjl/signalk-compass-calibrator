@@ -262,13 +262,14 @@ module.exports = function createPlugin (app) {
       const range = body.range || { from: body.from, to: body.to }
       const sources = { ...options.sources, ...(body.sources || {}) }
       assertSources(sources)
+      const filters = { ...options.filters, ...(body.filters || {}) }
       const resolutionSeconds = body.resolutionSeconds || 1
-      const series = await fetchCalibrationSeries(provider, sources, range, resolutionSeconds)
+      const series = await fetchCalibrationSeries(provider, sources, range, resolutionSeconds, filters)
       const profile = calibrate(series, {
         id: body.id,
         range,
         sources,
-        filters: { ...options.filters, ...(body.filters || {}) },
+        filters,
         calibration: { ...options.calibration, ...(body.calibration || {}) }
       })
       store.upsert(profile)
@@ -342,16 +343,69 @@ module.exports = function createPlugin (app) {
     })
   }
 
-  function fetchCalibrationSeries (provider, sources, range, resolutionSeconds) {
-    return Promise.all([
-      provider.getSeries('navigation.headingMagnetic', sources.heading, range, resolutionSeconds),
-      provider.getSeries('navigation.courseOverGroundTrue', sources.cog, range, resolutionSeconds),
-      provider.getSeries('navigation.speedOverGround', sources.sog, range, resolutionSeconds),
-      provider.getSeries('navigation.magneticVariation', sources.variation, range, resolutionSeconds),
-      sources.rateOfTurn
-        ? provider.getSeries('navigation.rateOfTurn', sources.rateOfTurn, range, resolutionSeconds).catch(() => [])
-        : Promise.resolve([])
-    ]).then(([heading, cog, sog, variation, rateOfTurn]) => ({ heading, cog, sog, variation, rateOfTurn }))
+  async function fetchCalibrationSeries (provider, sources, range, resolutionSeconds, filters = {}) {
+    const segments = await findUsefulSegments(provider, sources, range, resolutionSeconds, filters)
+    const heading = []
+    const cog = []
+    const sog = []
+    const variation = []
+    const rateOfTurn = []
+
+    for (const segment of segments) {
+      const [segmentHeading, segmentCog, segmentSog, segmentVariation, segmentRateOfTurn] = await Promise.all([
+        provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, resolutionSeconds),
+        provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, resolutionSeconds),
+        provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, resolutionSeconds),
+        provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, resolutionSeconds),
+        sources.rateOfTurn
+          ? provider.getSeriesChunked('navigation.rateOfTurn', sources.rateOfTurn, segment, resolutionSeconds).catch(() => [])
+          : Promise.resolve([])
+      ])
+      heading.push(...segmentHeading)
+      cog.push(...segmentCog)
+      sog.push(...segmentSog)
+      variation.push(...segmentVariation)
+      rateOfTurn.push(...segmentRateOfTurn)
+    }
+
+    return {
+      heading: dedupeSamples(heading),
+      cog: dedupeSamples(cog),
+      sog: dedupeSamples(sog),
+      variation: dedupeSamples(variation),
+      rateOfTurn: dedupeSamples(rateOfTurn)
+    }
+  }
+
+  async function findUsefulSegments (provider, sources, range, resolutionSeconds, filters = {}) {
+    const from = new Date(range.from).getTime()
+    const to = new Date(range.to).getTime()
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) throw httpError(400, 'Invalid calibration range')
+
+    const durationSeconds = Math.max((to - from) / 1000, 1)
+    const coarseResolution = Math.max(30, resolutionSeconds * 30, Math.ceil(durationSeconds / 3000))
+    const minSog = Number(filters.minSog || DEFAULT_OPTIONS.filters.minSog)
+    const minSegmentDuration = Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration)
+    const coarseSog = await provider.getSeriesChunked('navigation.speedOverGround', sources.sog, range, coarseResolution, 10000)
+    if (coarseSog.length === 0) return [range]
+
+    const paddingMs = coarseResolution * 2000
+    const segments = []
+    let start = null
+    let last = null
+    for (const sample of coarseSog) {
+      if (sample.value >= minSog) {
+        if (start === null) start = sample.t
+        last = sample.t
+      } else if (start !== null) {
+        addSegment(segments, start, last, from, to, paddingMs, minSegmentDuration)
+        start = null
+        last = null
+      }
+    }
+    if (start !== null) addSegment(segments, start, last, from, to, paddingMs, minSegmentDuration)
+
+    return mergeSegments(segments, coarseResolution * 2000)
   }
 
   function assertSources (sources) {
@@ -546,6 +600,45 @@ function mergeOptions (base, override) {
 
 function structuredCloneSafe (value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+function addSegment (segments, start, end, rangeFrom, rangeTo, paddingMs, minDurationSeconds) {
+  if (end - start < minDurationSeconds * 1000) return
+  segments.push({
+    from: new Date(Math.max(rangeFrom, start - paddingMs)).toISOString(),
+    to: new Date(Math.min(rangeTo, end + paddingMs)).toISOString()
+  })
+}
+
+function mergeSegments (segments, mergeGapMs) {
+  const sorted = segments
+    .map(segment => ({
+      from: new Date(segment.from).getTime(),
+      to: new Date(segment.to).getTime()
+    }))
+    .filter(segment => Number.isFinite(segment.from) && Number.isFinite(segment.to) && segment.to >= segment.from)
+    .sort((a, b) => a.from - b.from)
+
+  const merged = []
+  for (const segment of sorted) {
+    const previous = merged[merged.length - 1]
+    if (previous && segment.from - previous.to <= mergeGapMs) {
+      previous.to = Math.max(previous.to, segment.to)
+    } else {
+      merged.push({ ...segment })
+    }
+  }
+
+  return merged.map(segment => ({
+    from: new Date(segment.from).toISOString(),
+    to: new Date(segment.to).toISOString()
+  }))
+}
+
+function dedupeSamples (samples) {
+  const byTime = new Map()
+  for (const sample of samples) byTime.set(sample.t, sample)
+  return Array.from(byTime.values()).sort((a, b) => a.t - b.t)
 }
 
 function profileSummary (profile) {
