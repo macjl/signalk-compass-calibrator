@@ -32,7 +32,6 @@ test('calibration creates a candidate profile from aligned source series', () =>
     filters: {
       minSog: 1,
       maxCogRate: 10,
-      maxRateOfTurn: 5,
       minSamplesPerBin: 1,
       binSize: 30
     }
@@ -87,7 +86,6 @@ function makeSeries ({ headingOffsetDeg = 0, sog = 3 }) {
   const cog = []
   const speedOverGround = []
   const variation = []
-  const rateOfTurn = []
 
   for (let index = 0; index < 12; index += 1) {
     const headingDeg = index * 30
@@ -96,14 +94,12 @@ function makeSeries ({ headingOffsetDeg = 0, sog = 3 }) {
     cog.push({ t, value: degToRad(headingDeg) })
     speedOverGround.push({ t, value: sog })
     variation.push({ t, value: 0 })
-    rateOfTurn.push({ t, value: 0 })
   }
 
   return {
     heading,
     cog,
     sog: speedOverGround,
-    variation,
-    rateOfTurn
+    variation
   }
 }

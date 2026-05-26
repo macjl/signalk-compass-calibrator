@@ -3,7 +3,7 @@
 const fs = require('fs')
 const path = require('path')
 const { calibrate, compileCalibrationProfile, correctionForCompiledProfile } = require('./lib/calibration')
-const { wrap360Rad, radToDeg } = require('./lib/angles')
+const { wrap360Rad, wrap180Deg, radToDeg } = require('./lib/angles')
 const { DEFAULT_METRICS, PrometheusHistoryProvider } = require('./lib/prometheus-history-provider')
 const { createProfileStore } = require('./lib/profile-store')
 
@@ -32,7 +32,6 @@ const DEFAULT_OPTIONS = {
   },
   filters: {
     minSog: 1.5,
-    maxRateOfTurn: 0.5,
     maxCogRate: 1,
     maxSampleGapSeconds: 2,
     minSegmentDuration: 30,
@@ -242,18 +241,19 @@ module.exports = function createPlugin (app) {
         'navigation.headingMagnetic',
         'navigation.courseOverGroundTrue',
         'navigation.speedOverGround',
-        'navigation.magneticVariation',
-        'navigation.rateOfTurn'
+        'navigation.magneticVariation'
       ]
       const detectedContext = await provider.detectContextFromPath('navigation.magneticVariation', range, body.resolutionSeconds || 30).catch(() => null)
       if (detectedContext) provider = provider.withContext(detectedContext)
       const result = await provider.discover(paths, range, body.resolutionSeconds || 30)
       const diagnostics = await Promise.all(paths.map(path => provider.diagnosePath(path, range, body.resolutionSeconds || 30)))
+      const recommendations = await buildRecommendations(provider, result, range).catch(error => ({ error: error.message }))
       return {
         detectedContext,
         selectedContext: provider.context,
         paths: result,
-        diagnostics
+        diagnostics,
+        recommendations
       }
     }))
 
@@ -350,31 +350,25 @@ module.exports = function createPlugin (app) {
     const cog = []
     const sog = []
     const variation = []
-    const rateOfTurn = []
 
     for (const segment of segments) {
-      const [segmentHeading, segmentCog, segmentSog, segmentVariation, segmentRateOfTurn] = await Promise.all([
+      const [segmentHeading, segmentCog, segmentSog, segmentVariation] = await Promise.all([
         provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, resolutionSeconds),
         provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, resolutionSeconds),
         provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, resolutionSeconds),
-        provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, resolutionSeconds),
-        sources.rateOfTurn
-          ? provider.getSeriesChunked('navigation.rateOfTurn', sources.rateOfTurn, segment, resolutionSeconds).catch(() => [])
-          : Promise.resolve([])
+        provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, resolutionSeconds)
       ])
       heading.push(...segmentHeading)
       cog.push(...segmentCog)
       sog.push(...segmentSog)
       variation.push(...segmentVariation)
-      rateOfTurn.push(...segmentRateOfTurn)
     }
 
     return {
       heading: dedupeSamples(heading),
       cog: dedupeSamples(cog),
       sog: dedupeSamples(sog),
-      variation: dedupeSamples(variation),
-      rateOfTurn: dedupeSamples(rateOfTurn)
+      variation: dedupeSamples(variation)
     }
   }
 
@@ -498,8 +492,7 @@ function buildSchema () {
           heading: { type: 'string', title: 'Raw heading source' },
           cog: { type: 'string', title: 'COG source' },
           sog: { type: 'string', title: 'SOG source' },
-          variation: { type: 'string', title: 'Magnetic variation source' },
-          rateOfTurn: { type: 'string', title: 'Rate of turn source' }
+          variation: { type: 'string', title: 'Magnetic variation source' }
         }
       },
       filters: {
@@ -507,7 +500,6 @@ function buildSchema () {
         title: 'Calibration filters',
         properties: {
           minSog: { type: 'number', title: 'Minimum SOG (m/s)', default: 1.5 },
-          maxRateOfTurn: { type: 'number', title: 'Maximum rate of turn (deg/s)', default: 0.5 },
           maxCogRate: { type: 'number', title: 'Maximum COG rate (deg/s)', default: 1 },
           maxSampleGapSeconds: { type: 'number', title: 'Maximum sample gap (s)', default: 2 },
           minSegmentDuration: { type: 'number', title: 'Minimum segment duration (s)', default: 30 },
@@ -640,6 +632,96 @@ function dedupeSamples (samples) {
   const byTime = new Map()
   for (const sample of samples) byTime.set(sample.t, sample)
   return Array.from(byTime.values()).sort((a, b) => a.t - b.t)
+}
+
+async function buildRecommendations (provider, discovered, range) {
+  const sources = {
+    heading: bestDiscoveredSource(discovered['navigation.headingMagnetic']),
+    cog: bestDiscoveredSource(discovered['navigation.courseOverGroundTrue']),
+    sog: bestDiscoveredSource(discovered['navigation.speedOverGround']),
+    variation: bestDiscoveredSource(discovered['navigation.magneticVariation'])
+  }
+  const filters = {
+    minSog: DEFAULT_OPTIONS.filters.minSog,
+    maxCogRate: DEFAULT_OPTIONS.filters.maxCogRate,
+    minSamplesPerBin: DEFAULT_OPTIONS.filters.minSamplesPerBin
+  }
+  const calibration = {
+    binSize: DEFAULT_OPTIONS.calibration.binSize
+  }
+
+  const from = new Date(range.from).getTime()
+  const to = new Date(range.to).getTime()
+  const durationSeconds = Math.max((to - from) / 1000, 1)
+  const coarseResolution = Math.max(30, Math.ceil(durationSeconds / 2500))
+  let movingSampleCount = 0
+
+  if (sources.sog) {
+    const sog = await provider.getSeriesChunked('navigation.speedOverGround', sources.sog, range, coarseResolution, 10000)
+    const speeds = sog.map(sample => sample.value).filter(value => Number.isFinite(value) && value > 0.2).sort((a, b) => a - b)
+    movingSampleCount = speeds.length
+    if (speeds.length > 0) {
+      filters.minSog = round1(clamp(percentile(speeds, 0.35), 0.8, 3))
+    }
+  }
+
+  if (sources.cog) {
+    const cog = await provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, range, coarseResolution, 10000)
+    const cogRates = []
+    for (let index = 1; index < cog.length; index += 1) {
+      const dt = (cog[index].t - cog[index - 1].t) / 1000
+      if (dt <= 0) continue
+      cogRates.push(Math.abs(wrap180Deg(radToDeg(cog[index].value - cog[index - 1].value))) / dt)
+    }
+    const usefulRates = cogRates.filter(value => Number.isFinite(value) && value > 0).sort((a, b) => a - b)
+    if (usefulRates.length > 0) {
+      filters.maxCogRate = round1(clamp(percentile(usefulRates, 0.65), 0.5, 3))
+    }
+  }
+
+  const headingSamples = discovered['navigation.headingMagnetic'] || []
+  const totalHeadingSamples = headingSamples.reduce((sum, source) => sum + Number(source.sampleCount || 0), 0)
+  const estimatedSamples = Math.max(totalHeadingSamples, movingSampleCount)
+  if (estimatedSamples < 500) {
+    calibration.binSize = 30
+    filters.minSamplesPerBin = 5
+  } else if (estimatedSamples < 1500) {
+    calibration.binSize = 15
+    filters.minSamplesPerBin = 8
+  } else {
+    calibration.binSize = 10
+    filters.minSamplesPerBin = 10
+  }
+
+  return {
+    sources,
+    filters,
+    calibration,
+    resolutionSeconds: durationSeconds > 7 * 86400 ? 2 : 1
+  }
+}
+
+function bestDiscoveredSource (sources = []) {
+  const best = [...sources].sort((a, b) => {
+    const scoreA = Number(a.coveragePercent || 0) * 1000000 + Number(a.sampleCount || 0)
+    const scoreB = Number(b.coveragePercent || 0) * 1000000 + Number(b.sampleCount || 0)
+    return scoreB - scoreA
+  })[0]
+  return best ? best.source : ''
+}
+
+function percentile (sortedValues, fraction) {
+  if (!sortedValues.length) return null
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.floor((sortedValues.length - 1) * fraction)))
+  return sortedValues[index]
+}
+
+function clamp (value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function round1 (value) {
+  return Math.round(value * 10) / 10
 }
 
 function profileSummary (profile) {

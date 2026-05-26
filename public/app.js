@@ -36,8 +36,7 @@ const metricInputs = {
   headingMagnetic: 'metricHeadingMagnetic',
   courseOverGroundTrue: 'metricCourseOverGroundTrue',
   speedOverGround: 'metricSpeedOverGround',
-  magneticVariation: 'metricMagneticVariation',
-  rateOfTurn: 'metricRateOfTurn'
+  magneticVariation: 'metricMagneticVariation'
 }
 
 setDefaultDates()
@@ -110,6 +109,7 @@ async function discoverSources () {
   mirrorDiscoveryRangeToCalibration()
   applyDetectedContext(data.selectedContext || data.detectedContext)
   let count = renderSources(data.paths || data)
+  applyRecommendations(data.recommendations)
   renderDiagnostics(data.diagnostics || [])
   if (count === 0) {
     showWarning('Discovery completed, but no historical samples matched these metrics, inferred context, sources and time range.')
@@ -196,6 +196,41 @@ function populateSourcePickers (data) {
   }
 }
 
+function applyRecommendations (recommendations) {
+  if (!recommendations || recommendations.error) return
+
+  if (recommendations.sources) {
+    for (const [key, source] of Object.entries(recommendations.sources)) {
+      const path = {
+        heading: paths.heading,
+        cog: paths.cog,
+        sog: paths.sog,
+        variation: paths.variation
+      }[key]
+      const target = sourceInputs[path]
+      if (target && source) {
+        document.getElementById(target.inputId).value = source
+      }
+    }
+  }
+
+  if (recommendations.filters) {
+    setNumberIfFinite('minSog', recommendations.filters.minSog)
+    setNumberIfFinite('maxCogRate', recommendations.filters.maxCogRate)
+    setNumberIfFinite('minSamplesPerBin', recommendations.filters.minSamplesPerBin)
+  }
+  if (recommendations.calibration) {
+    setNumberIfFinite('binSize', recommendations.calibration.binSize)
+  }
+  setNumberIfFinite('resolution', recommendations.resolutionSeconds)
+  persistFields()
+}
+
+function setNumberIfFinite (id, nextValue) {
+  if (!Number.isFinite(Number(nextValue))) return
+  document.getElementById(id).value = String(nextValue)
+}
+
 function bestSources (sources) {
   const bySource = new Map()
   for (const source of sources) {
@@ -231,7 +266,6 @@ async function runCalibration () {
     },
     filters: {
       minSog: numberValue('minSog'),
-      maxRateOfTurn: numberValue('maxRateOfTurn'),
       maxCogRate: numberValue('maxCogRate'),
       minSamplesPerBin: numberValue('minSamplesPerBin')
     },
@@ -480,7 +514,6 @@ function persistedFieldIds () {
     'to',
     'resolution',
     'minSog',
-    'maxRateOfTurn',
     'maxCogRate',
     'binSize',
     'minSamplesPerBin',

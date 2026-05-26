@@ -67,10 +67,6 @@
               Magnetic variation metric
               <input id="metricMagneticVariation" value="navigation_magneticVariation">
             </label>
-            <label>
-              Rate of turn metric
-              <input id="metricRateOfTurn" value="navigation_rateOfTurn">
-            </label>
           </div>
         </details>
         <div id="sources" class="tableWrap"></div>
@@ -104,36 +100,37 @@
             To
             <input id="to" type="datetime-local">
           </label>
-          <label>
-            Resolution (s)
-            <input id="resolution" type="number" min="1" value="1">
-          </label>
-          <label>
-            Minimum SOG (m/s)
-            <input id="minSog" type="number" step="0.1" value="1.5">
-          </label>
-          <label>
-            Maximum rate of turn (deg/s)
-            <input id="maxRateOfTurn" type="number" step="0.1" value="0.5">
-          </label>
-          <label>
-            Maximum COG rate (deg/s)
-            <input id="maxCogRate" type="number" step="0.1" value="1">
-          </label>
-          <label>
-            Bin size
-            <select id="binSize">
-              <option>5</option>
-              <option selected>10</option>
-              <option>15</option>
-              <option>30</option>
-            </select>
-          </label>
-          <label>
-            Minimum samples per bin
-            <input id="minSamplesPerBin" type="number" min="1" value="10">
-          </label>
         </div>
+        <details class="advanced">
+          <summary>Calibration settings</summary>
+          <div class="grid">
+            <label>
+              Resolution (s)
+              <input id="resolution" type="number" min="1" value="1">
+            </label>
+            <label>
+              Minimum SOG (m/s)
+              <input id="minSog" type="number" step="0.1" value="1.5">
+            </label>
+            <label>
+              Maximum COG rate (deg/s)
+              <input id="maxCogRate" type="number" step="0.1" value="1">
+            </label>
+            <label>
+              Bin size
+              <select id="binSize">
+                <option>5</option>
+                <option selected>10</option>
+                <option>15</option>
+                <option>30</option>
+              </select>
+            </label>
+            <label>
+              Minimum samples per bin
+              <input id="minSamplesPerBin" type="number" min="1" value="10">
+            </label>
+          </div>
+        </details>
         <div class="actions">
           <button id="calibrate" type="button">Run calibration</button>
         </div>
