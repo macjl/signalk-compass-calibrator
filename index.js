@@ -236,7 +236,7 @@ module.exports = function createPlugin (app) {
 
     router.post('/api/discover', asyncRoute(async req => {
       const body = await readBody(req)
-      const provider = makeProvider(body)
+      let provider = makeProvider(body)
       const range = body.range || { from: body.from, to: body.to }
       const paths = body.paths || [
         'navigation.headingMagnetic',
@@ -245,11 +245,12 @@ module.exports = function createPlugin (app) {
         'navigation.magneticVariation',
         'navigation.rateOfTurn'
       ]
-      const contexts = await provider.labelValues('context').catch(() => [])
+      const detectedContext = await provider.detectContextFromPath('navigation.magneticVariation', range, body.resolutionSeconds || 30).catch(() => null)
+      if (detectedContext) provider = provider.withContext(detectedContext)
       const result = await provider.discover(paths, range, body.resolutionSeconds || 30)
       const diagnostics = await Promise.all(paths.map(path => provider.diagnosePath(path, range, body.resolutionSeconds || 30)))
       return {
-        contexts,
+        detectedContext,
         selectedContext: provider.context,
         paths: result,
         diagnostics

@@ -143,6 +143,28 @@ test('Prometheus provider chunks long range queries', async () => {
   assert.equal(samples.length, 4)
 })
 
+test('Prometheus provider detects context from range samples', async () => {
+  const provider = new PrometheusHistoryProvider({
+    baseUrl: 'http://history.example',
+    fetch: async () => jsonResponse({
+      status: 'success',
+      data: {
+        result: [
+          { metric: { context: 'vessels.a' }, values: [[0, '1']] },
+          { metric: { context: 'vessels.b' }, values: [[0, '1'], [1, '1']] }
+        ]
+      }
+    })
+  })
+
+  const context = await provider.detectContextFromPath('navigation.magneticVariation', {
+    from: '2026-05-25T00:00:00Z',
+    to: '2026-05-25T00:01:00Z'
+  })
+
+  assert.equal(context, 'vessels.b')
+})
+
 function jsonResponse (body) {
   return {
     ok: true,

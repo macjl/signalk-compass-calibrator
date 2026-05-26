@@ -16,22 +16,18 @@ const paths = {
 const sourceInputs = {
   [paths.heading]: {
     inputId: 'headingSource',
-    datalistId: 'headingSourceOptions',
     label: 'heading'
   },
   [paths.cog]: {
     inputId: 'cogSource',
-    datalistId: 'cogSourceOptions',
     label: 'COG'
   },
   [paths.sog]: {
     inputId: 'sogSource',
-    datalistId: 'sogSourceOptions',
     label: 'SOG'
   },
   [paths.variation]: {
     inputId: 'variationSource',
-    datalistId: 'variationSourceOptions',
     label: 'variation'
   }
 }
@@ -84,7 +80,7 @@ function dateValue (id) {
 
 async function loadSources () {
   const data = await api('/api/sources')
-  setIfNotRestored('context', data.context || 'vessels.self')
+  setIfNotRestored('context', data.context || 'auto')
   if (data.prometheus) {
     setIfNotRestored('baseUrl', data.prometheus.baseUrl || '')
     setIfNotRestored('historyUsername', data.prometheus.auth && data.prometheus.auth.username || '')
@@ -102,7 +98,7 @@ async function discoverSources () {
   const payload = {
     baseUrl: value('baseUrl'),
     auth: historyAuth(),
-    context: value('context'),
+    context: '',
     metrics: metricValues(),
     range: {
       from: dateValue('discoverFrom'),
@@ -112,29 +108,13 @@ async function discoverSources () {
   }
   const data = await api('/api/discover', payload)
   mirrorDiscoveryRangeToCalibration()
-  applyDiscoveredContexts(data.contexts || [])
+  applyDetectedContext(data.selectedContext || data.detectedContext)
   let count = renderSources(data.paths || data)
   renderDiagnostics(data.diagnostics || [])
-  if (count === 0 && shouldRetryWithDiscoveredContext(payload.context, data.contexts)) {
-    payload.context = data.contexts[0]
-    document.getElementById('context').value = payload.context
-    persistFields()
-    const retry = await api('/api/discover', payload)
-    applyDiscoveredContexts(retry.contexts || data.contexts || [])
-    count = renderSources(retry.paths || retry)
-    renderDiagnostics(retry.diagnostics || data.diagnostics || [])
-    if (count > 0) {
-      showOk(`Historical source discovery completed after switching context to ${payload.context}: ${count} source entries found.`)
-      return
-    }
-  }
   if (count === 0) {
-    const contextHint = data.contexts && data.contexts.length
-      ? ` Available contexts: ${data.contexts.join(', ')}.`
-      : ''
-    showWarning(`Discovery completed, but no historical samples matched these metrics, context, sources and time range.${contextHint}`)
+    showWarning('Discovery completed, but no historical samples matched these metrics, inferred context, sources and time range.')
   } else {
-    showOk(`Historical source discovery completed: ${count} source entries found.`)
+    showOk(`Historical source discovery completed for ${value('context')}: ${count} source entries found.`)
   }
 }
 
@@ -144,7 +124,6 @@ function renderSources (data) {
     for (const source of sources) {
       rows.push([
         path,
-        `<button type="button" data-path="${path}" data-source="${escapeHtml(source.source)}">Use</button>`,
         source.source,
         source.sampleCount,
         source.coveragePercent,
@@ -156,12 +135,9 @@ function renderSources (data) {
   }
   populateSourcePickers(data)
   document.getElementById('sources').innerHTML = table(
-    ['Path', '', 'Source', 'Samples', 'Coverage %', 'First', 'Last', 'Latest'],
+    ['Path', 'Source', 'Samples', 'Coverage %', 'First', 'Last', 'Latest'],
     rows
   )
-  document.querySelectorAll('#sources button').forEach(button => {
-    button.addEventListener('click', () => useSource(button.dataset.path, button.dataset.source))
-  })
   return rows.length
 }
 
@@ -195,35 +171,26 @@ function renderDiagnostics (diagnostics) {
   `
 }
 
-function useSource (path, source) {
-  const target = sourceInputs[path]
-  if (target) {
-    document.getElementById(target.inputId).value = source
-    persistFields()
-  }
-}
-
-function applyDiscoveredContexts (contexts) {
-  document.getElementById('contextOptions').innerHTML = contexts
-    .map(context => `<option value="${escapeHtml(context)}"></option>`)
-    .join('')
-}
-
-function shouldRetryWithDiscoveredContext (context, contexts) {
-  return context === 'vessels.self' && Array.isArray(contexts) && contexts.length === 1 && contexts[0] !== context
+function applyDetectedContext (context) {
+  if (!context) return
+  document.getElementById('context').value = context
+  persistFields()
 }
 
 function populateSourcePickers (data) {
   for (const [path, target] of Object.entries(sourceInputs)) {
     const sources = Array.isArray(data[path]) ? data[path] : []
     const unique = bestSources(sources)
-    document.getElementById(target.datalistId).innerHTML = unique
-      .map(source => `<option value="${escapeHtml(source.source)}" label="${target.label}: ${source.sampleCount} samples, ${source.coveragePercent}% coverage"></option>`)
-      .join('')
-
-    const input = document.getElementById(target.inputId)
-    if (!input.value && unique.length > 0) {
-      input.value = unique[0].source
+    const select = document.getElementById(target.inputId)
+    const previous = select.value
+    select.innerHTML = [
+      '<option value="">Select source</option>',
+      ...unique.map(source => `<option value="${escapeHtml(source.source)}">${escapeHtml(source.source)} (${source.sampleCount} samples, ${source.coveragePercent}% coverage)</option>`)
+    ].join('')
+    if (previous && unique.some(source => source.source === previous)) {
+      select.value = previous
+    } else if (unique.length > 0) {
+      select.value = unique[0].source
       persistFields()
     }
   }
