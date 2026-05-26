@@ -299,6 +299,7 @@ function renderProfile (profile) {
     ${renderCalibrationTimeline(profile)}
     ${renderSegmentSummary(profile.segments || [])}
   `
+  drawCoverageRose('globalCoverage', binsFromCorrectionTable(profile.correctionTable || []), numberValue('minSamplesPerBin'))
   document.getElementById('table').innerHTML = table(
     ['Heading', 'Correction', 'Samples', 'Mean error', 'Stddev', 'Quality', 'Interpolated'],
     profile.correctionTable.map(bin => [
@@ -312,6 +313,7 @@ function renderProfile (profile) {
     ])
   )
   drawPlot(profile)
+  drawNavigationCoverageRoses(profile.segments || [])
 }
 
 function renderSegmentSummary (segments) {
@@ -346,6 +348,16 @@ function renderCalibrationTimeline (profile) {
   if (!range) return ''
   return `
     <h3>Calibration timeline</h3>
+    <div class="coveragePanel">
+      <div>
+        <h4>Heading coverage</h4>
+        <canvas id="globalCoverage" class="coverageRose" width="260" height="260"></canvas>
+      </div>
+      <div class="coverageNotes">
+        <p>Radial fill shows samples per heading bin against the minimum samples per bin.</p>
+        <p>Rings mark 25%, 50%, 75%, and 100% of the target.</p>
+      </div>
+    </div>
     <div class="timelineLegend">
       <span><i class="legendNavigation"></i>navigation</span>
       <span><i class="legendStable"></i>COG stable used</span>
@@ -395,7 +407,7 @@ function renderNavigationZoom (segment, index) {
         ${metric('COG p90', `${formatValue(segment.stats && segment.stats.cogRateP90)} deg/s`)}
         ${metric('Heading coverage', `${coverageDeg} deg`)}
       </div>
-      ${renderHeadingBins(segment.headingBins || [])}
+      <canvas id="coverage-${index}" class="coverageRose small" width="180" height="180"></canvas>
     </details>
   `
 }
@@ -406,20 +418,6 @@ function timelineBlock (segment, range, type) {
   const left = percent((segmentRange.from - range.from) / (range.to - range.from))
   const width = Math.max(0.3, percent((segmentRange.to - segmentRange.from) / (range.to - range.from)))
   return `<span class="timelineBlock ${type}" style="left:${left}%;width:${width}%" title="${escapeHtml(formatDateTime(segmentRange.from))} - ${escapeHtml(formatDateTime(segmentRange.to))}"></span>`
-}
-
-function renderHeadingBins (bins) {
-  if (!bins.length) return ''
-  const maxSamples = Math.max(1, ...bins.map(bin => Number(bin.samples || 0)))
-  return `
-    <div class="headingBins" aria-label="Heading coverage">
-      ${bins.map(bin => {
-        const level = Math.max(3, Math.round(Number(bin.samples || 0) / maxSamples * 100))
-        const label = `${bin.fromDeg}-${bin.toDeg} deg: ${bin.samples} samples`
-        return `<span class="${bin.samples > 0 ? 'covered' : 'empty'}" style="height:${level}%" title="${escapeHtml(label)}"></span>`
-      }).join('')}
-    </div>
-  `
 }
 
 async function activateCandidate () {
@@ -549,24 +547,55 @@ function drawPlot (profile) {
   const ctx = canvas.getContext('2d')
   const width = canvas.width
   const height = canvas.height
+  const chart = {
+    left: 48,
+    right: width - 22,
+    top: 26,
+    bottom: height - 34
+  }
   ctx.clearRect(0, 0, width, height)
+  ctx.font = '12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
   ctx.strokeStyle = '#d8ded8'
   ctx.lineWidth = 1
-  for (let y = 30; y < height; y += 50) {
-    ctx.beginPath()
-    ctx.moveTo(40, y)
-    ctx.lineTo(width - 20, y)
-    ctx.stroke()
-  }
-  ctx.fillStyle = '#65716b'
-  ctx.fillText('Correction deg', 40, 18)
-  ctx.fillText('Heading deg', width - 105, height - 10)
-
   const values = profile.correctionTable.filter(bin => Number.isFinite(bin.correctionDeg))
-  if (!values.length) return
   const maxAbs = Math.max(5, ...values.map(bin => Math.abs(bin.correctionDeg)))
-  const xFor = heading => 40 + heading / 360 * (width - 70)
-  const yFor = correction => height / 2 - correction / maxAbs * (height / 2 - 32)
+  const yTicks = [-maxAbs, -maxAbs / 2, 0, maxAbs / 2, maxAbs]
+  const xTicks = [0, 90, 180, 270, 360]
+  const xFor = heading => chart.left + heading / 360 * (chart.right - chart.left)
+  const yFor = correction => chart.bottom - (correction + maxAbs) / (maxAbs * 2) * (chart.bottom - chart.top)
+
+  for (const correction of yTicks) {
+    const y = yFor(correction)
+    ctx.beginPath()
+    ctx.moveTo(chart.left, y)
+    ctx.lineTo(chart.right, y)
+    ctx.stroke()
+    ctx.fillStyle = '#65716b'
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(`${formatValue(correction)} deg`, chart.left - 7, y)
+  }
+
+  for (const heading of xTicks) {
+    const x = xFor(heading)
+    ctx.beginPath()
+    ctx.moveTo(x, chart.top)
+    ctx.lineTo(x, chart.bottom)
+    ctx.stroke()
+    ctx.fillStyle = '#65716b'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'top'
+    ctx.fillText(`${heading} deg`, x, chart.bottom + 8)
+  }
+
+  ctx.fillStyle = '#65716b'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'alphabetic'
+  ctx.fillText('Correction', chart.left, 16)
+  ctx.textAlign = 'right'
+  ctx.fillText('Heading', chart.right, height - 8)
+
+  if (!values.length) return
 
   ctx.strokeStyle = '#11685d'
   ctx.lineWidth = 2
@@ -585,6 +614,82 @@ function drawPlot (profile) {
     ctx.arc(xFor(bin.headingDeg), yFor(bin.correctionDeg), bin.interpolated ? 3 : 4, 0, Math.PI * 2)
     ctx.fill()
   }
+}
+
+function drawNavigationCoverageRoses (segments) {
+  segments.forEach((segment, index) => {
+    drawCoverageRose(`coverage-${index}`, segment.headingBins || [], numberValue('minSamplesPerBin'))
+  })
+}
+
+function drawCoverageRose (canvasId, bins, targetSamples) {
+  const canvas = document.getElementById(canvasId)
+  if (!canvas || !bins.length) return
+  const ctx = canvas.getContext('2d')
+  const width = canvas.width
+  const height = canvas.height
+  const centerX = width / 2
+  const centerY = height / 2
+  const radius = Math.min(width, height) * 0.38
+  const target = Math.max(1, Number(targetSamples || 1))
+  ctx.clearRect(0, 0, width, height)
+  ctx.font = `${Math.max(10, Math.round(width / 22))}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
+
+  drawCoverageRings(ctx, centerX, centerY, radius)
+  const binCount = bins.length
+  for (let index = 0; index < binCount; index += 1) {
+    const bin = bins[index]
+    const samples = Number(bin.samples || 0)
+    const fillFraction = Math.max(0, Math.min(1, samples / target))
+    const inner = 0
+    const outer = radius * fillFraction
+    const start = -Math.PI / 2 + index / binCount * Math.PI * 2
+    const end = -Math.PI / 2 + (index + 1) / binCount * Math.PI * 2
+    ctx.beginPath()
+    ctx.moveTo(centerX, centerY)
+    ctx.arc(centerX, centerY, outer, start + 0.01, end - 0.01)
+    ctx.closePath()
+    ctx.fillStyle = samples >= target ? '#137547' : samples > 0 ? '#9b5c00' : '#d8ded8'
+    ctx.fill()
+    if (inner > 0) ctx.clearRect(centerX - inner, centerY - inner, inner * 2, inner * 2)
+  }
+  drawCoverageFrame(ctx, centerX, centerY, radius)
+}
+
+function drawCoverageRings (ctx, centerX, centerY, radius) {
+  ctx.strokeStyle = '#d8ded8'
+  ctx.lineWidth = 1
+  ctx.fillStyle = '#65716b'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  for (const fraction of [0.25, 0.5, 0.75, 1]) {
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius * fraction, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.fillText(`${Math.round(fraction * 100)}%`, centerX + radius * fraction + 4, centerY)
+  }
+}
+
+function drawCoverageFrame (ctx, centerX, centerY, radius) {
+  ctx.strokeStyle = '#65716b'
+  ctx.lineWidth = 1
+  for (const heading of [0, 90, 180, 270]) {
+    const angle = -Math.PI / 2 + heading / 180 * Math.PI
+    ctx.beginPath()
+    ctx.moveTo(centerX, centerY)
+    ctx.lineTo(centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius)
+    ctx.stroke()
+  }
+  ctx.fillStyle = '#19211d'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  const labels = [
+    ['N', centerX, centerY - radius - 12],
+    ['E', centerX + radius + 12, centerY],
+    ['S', centerX, centerY + radius + 12],
+    ['W', centerX - radius - 12, centerY]
+  ]
+  for (const [label, x, y] of labels) ctx.fillText(label, x, y)
 }
 
 function table (headers, rows) {
@@ -702,6 +807,14 @@ function formatDateTime (input) {
 
 function headingCoverageDeg (bins) {
   return bins.filter(bin => Number(bin.samples || 0) > 0).length * 10
+}
+
+function binsFromCorrectionTable (correctionTable) {
+  return correctionTable.map(bin => ({
+    fromDeg: bin.fromDeg,
+    toDeg: bin.toDeg,
+    samples: Number(bin.samples || 0)
+  }))
 }
 
 function mpsToKnots (value) {

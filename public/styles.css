@@ -254,6 +254,39 @@ select {
   overflow: hidden;
 }
 
+.coveragePanel {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(220px, 1fr);
+  gap: 16px;
+  align-items: center;
+  margin: 6px 0 14px;
+}
+
+.coveragePanel h4 {
+  margin: 0 0 6px;
+}
+
+.coverageNotes {
+  color: var(--muted);
+  display: grid;
+  gap: 5px;
+}
+
+.coverageRose {
+  width: 260px;
+  max-width: 100%;
+  height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.coverageRose.small {
+  width: 180px;
+  height: 180px;
+  margin-top: 10px;
+}
+
 .timelineBlock {
   position: absolute;
   border-radius: 5px;
@@ -305,30 +338,6 @@ select {
   grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
   gap: 8px;
   margin-top: 10px;
-}
-
-.headingBins {
-  align-items: end;
-  display: grid;
-  grid-template-columns: repeat(36, 1fr);
-  gap: 2px;
-  height: 74px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.headingBins span {
-  min-height: 3px;
-  border-radius: 3px 3px 0 0;
-}
-
-.headingBins .covered {
-  background: var(--good);
-}
-
-.headingBins .empty {
-  background: #d8ded8;
 }
 
 table {
@@ -387,5 +396,9 @@ canvas {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .coveragePanel {
+    grid-template-columns: 1fr;
   }
 }
