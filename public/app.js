@@ -9,6 +9,29 @@ const paths = {
   variation: 'navigation.magneticVariation'
 }
 
+const sourceInputs = {
+  [paths.heading]: {
+    inputId: 'headingSource',
+    datalistId: 'headingSourceOptions',
+    label: 'heading'
+  },
+  [paths.cog]: {
+    inputId: 'cogSource',
+    datalistId: 'cogSourceOptions',
+    label: 'COG'
+  },
+  [paths.sog]: {
+    inputId: 'sogSource',
+    datalistId: 'sogSourceOptions',
+    label: 'SOG'
+  },
+  [paths.variation]: {
+    inputId: 'variationSource',
+    datalistId: 'variationSourceOptions',
+    label: 'variation'
+  }
+}
+
 setDefaultDates()
 bindEvents()
 loadRuntime().catch(showError)
@@ -72,8 +95,12 @@ async function discoverSources () {
     resolutionSeconds: 30
   }
   const data = await api('/api/discover', payload)
-  renderSources(data)
-  showOk('Historical source discovery completed.')
+  const count = renderSources(data)
+  if (count === 0) {
+    showWarning('Discovery completed, but no historical samples matched these metrics, context, sources and time range. Check the context value, range, metric names, and Prometheus labels.')
+  } else {
+    showOk(`Historical source discovery completed: ${count} source entries found.`)
+  }
 }
 
 function renderSources (data) {
@@ -92,6 +119,7 @@ function renderSources (data) {
       ])
     }
   }
+  populateSourcePickers(data)
   document.getElementById('sources').innerHTML = table(
     ['Path', '', 'Source', 'Samples', 'Coverage %', 'First', 'Last', 'Latest'],
     rows
@@ -99,13 +127,43 @@ function renderSources (data) {
   document.querySelectorAll('#sources button').forEach(button => {
     button.addEventListener('click', () => useSource(button.dataset.path, button.dataset.source))
   })
+  return rows.length
 }
 
 function useSource (path, source) {
-  if (path === paths.heading) document.getElementById('headingSource').value = source
-  if (path === paths.cog) document.getElementById('cogSource').value = source
-  if (path === paths.sog) document.getElementById('sogSource').value = source
-  if (path === paths.variation) document.getElementById('variationSource').value = source
+  const target = sourceInputs[path]
+  if (target) document.getElementById(target.inputId).value = source
+}
+
+function populateSourcePickers (data) {
+  for (const [path, target] of Object.entries(sourceInputs)) {
+    const sources = Array.isArray(data[path]) ? data[path] : []
+    const unique = bestSources(sources)
+    document.getElementById(target.datalistId).innerHTML = unique
+      .map(source => `<option value="${escapeHtml(source.source)}" label="${target.label}: ${source.sampleCount} samples, ${source.coveragePercent}% coverage"></option>`)
+      .join('')
+
+    const input = document.getElementById(target.inputId)
+    if (!input.value && unique.length > 0) {
+      input.value = unique[0].source
+    }
+  }
+}
+
+function bestSources (sources) {
+  const bySource = new Map()
+  for (const source of sources) {
+    if (!source.source) continue
+    const previous = bySource.get(source.source)
+    if (!previous || sourceScore(source) > sourceScore(previous)) {
+      bySource.set(source.source, source)
+    }
+  }
+  return Array.from(bySource.values()).sort((a, b) => sourceScore(b) - sourceScore(a))
+}
+
+function sourceScore (source) {
+  return Number(source.coveragePercent || 0) * 1000000 + Number(source.sampleCount || 0)
 }
 
 async function runCalibration () {
@@ -251,6 +309,10 @@ function historyAuth () {
 
 function showOk (message) {
   showMessage(message, 'ok')
+}
+
+function showWarning (message) {
+  showMessage(message, 'warning')
 }
 
 function showError (error, fallback = 'Request failed') {

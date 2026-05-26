@@ -111,6 +111,13 @@ h2 {
   font-weight: 700;
 }
 
+.message.warning {
+  border-color: #e0c38e;
+  background: #fff8ea;
+  color: var(--warn);
+  font-weight: 700;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
