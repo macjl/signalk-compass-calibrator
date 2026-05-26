@@ -73,7 +73,7 @@ module.exports = function createPlugin (app) {
     id: PLUGIN_ID,
     name: 'Compass Calibrator',
     description: 'Calibrate a selected magnetic heading source using source-aware historical COG/SOG/variation data.',
-    schema: buildSchema(),
+    schema: buildSchema,
     start,
     stop,
     registerWithRouter
