@@ -1,0 +1,33 @@
+{
+  "name": "signalk-compass-calibrator",
+  "version": "0.1.0",
+  "description": "Signal K plugin that calibrates magnetic heading from source-aware historical navigation data.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "signalk",
+    "signalk-plugin",
+    "compass",
+    "calibration",
+    "victoriametrics",
+    "prometheus"
+  ],
+  "author": "Jean-Laurent Girod (@macjl)",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/macjl/signalk-compass-calibrator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/macjl/signalk-compass-calibrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/macjl/signalk-compass-calibrator/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "signalk-plugin-enabled-by-default": false
+}

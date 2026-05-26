@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Compass Calibrator</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Compass Calibrator</h1>
+          <p>Batch-calibrate a selected magnetic heading source from source-aware historical data.</p>
+        </div>
+        <button id="refreshRuntime" type="button">Refresh</button>
+      </header>
+
+      <section class="panel">
+        <h2>Sources</h2>
+        <div class="grid">
+          <label>
+            Context
+            <input id="context" value="vessels.self">
+          </label>
+          <label>
+            History backend URL
+            <input id="baseUrl" value="http://victoriametrics:8428">
+          </label>
+          <label>
+            Discovery from
+            <input id="discoverFrom" type="datetime-local">
+          </label>
+          <label>
+            Discovery to
+            <input id="discoverTo" type="datetime-local">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="discover" type="button">Discover historical sources</button>
+        </div>
+        <div id="sources" class="tableWrap"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Calibration</h2>
+        <div class="grid">
+          <label>
+            Heading source
+            <input id="headingSource">
+          </label>
+          <label>
+            COG source
+            <input id="cogSource">
+          </label>
+          <label>
+            SOG source
+            <input id="sogSource">
+          </label>
+          <label>
+            Variation source
+            <input id="variationSource">
+          </label>
+          <label>
+            From
+            <input id="from" type="datetime-local">
+          </label>
+          <label>
+            To
+            <input id="to" type="datetime-local">
+          </label>
+          <label>
+            Resolution (s)
+            <input id="resolution" type="number" min="1" value="1">
+          </label>
+          <label>
+            Minimum SOG (m/s)
+            <input id="minSog" type="number" step="0.1" value="1.5">
+          </label>
+          <label>
+            Maximum rate of turn (deg/s)
+            <input id="maxRateOfTurn" type="number" step="0.1" value="0.5">
+          </label>
+          <label>
+            Maximum COG rate (deg/s)
+            <input id="maxCogRate" type="number" step="0.1" value="1">
+          </label>
+          <label>
+            Bin size
+            <select id="binSize">
+              <option>5</option>
+              <option selected>10</option>
+              <option>15</option>
+              <option>30</option>
+            </select>
+          </label>
+          <label>
+            Minimum samples per bin
+            <input id="minSamplesPerBin" type="number" min="1" value="10">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="calibrate" type="button">Run calibration</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Profile Review</h2>
+        <div id="candidate" class="summary muted">No candidate profile yet.</div>
+        <canvas id="plot" width="720" height="260"></canvas>
+        <div id="table" class="tableWrap"></div>
+        <div class="actions">
+          <button id="activate" type="button" disabled>Activate candidate</button>
+          <button id="reject" type="button" disabled>Reject candidate</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Runtime</h2>
+        <div id="runtime" class="summary muted">Runtime not loaded.</div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
