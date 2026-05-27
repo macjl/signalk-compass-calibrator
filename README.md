@@ -60,7 +60,7 @@ signalk-compass-calibrator
 npm test
 ```
 
-GitHub Actions runs the same test suite on Node 20, 22, and 24, checks JavaScript syntax, and verifies the npm package contents with `npm pack --dry-run`.
+GitHub Actions uses the shared Signal K plugin CI workflow to validate the package on pushes and pull requests.
 
 ## Author
 
