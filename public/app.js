@@ -4,6 +4,7 @@ let candidateProfile = null
 let restoredFields = new Set()
 let savedProfiles = []
 let selectedProfile = null
+let lastDiscovery = null
 
 const STORAGE_KEY = 'signalk-compass-calibrator.settings.v2'
 const SECRET_STORAGE_KEY = 'signalk-compass-calibrator.sessionSecrets.v1'
@@ -53,6 +54,10 @@ function bindEvents () {
   bindPersistence()
   bindTabs()
   document.getElementById('discover').addEventListener('click', () => runAction('Discover failed', discoverSources))
+  document.getElementById('context').addEventListener('change', () => {
+    populateSourcePickers(pathsForContext(lastDiscovery, value('context')))
+    persistFields()
+  })
   document.getElementById('calibrate').addEventListener('click', () => runAction('Calibration failed', runCalibration))
   document.getElementById('saveCandidate').addEventListener('click', () => runAction('Save failed', saveCandidate))
   document.getElementById('cancelCandidate').addEventListener('click', cancelCandidate)
@@ -115,7 +120,8 @@ function dateValue (id) {
 
 async function loadSources () {
   const data = await api('/api/sources')
-  setIfNotRestored('context', data.context || 'auto')
+  ensureContextOption(data.context || '')
+  setIfNotRestored('context', data.context || '')
   if (data.prometheus) {
     setIfNotRestored('baseUrl', data.prometheus.baseUrl || '')
     setIfNotRestored('historyUsername', data.prometheus.auth && data.prometheus.auth.username || '')
@@ -150,12 +156,15 @@ async function discoverSources () {
     resolutionSeconds: 30
   }
   const data = await api('/api/discover', payload)
+  lastDiscovery = data
   mirrorDiscoveryRangeToCalibration()
-  applyDetectedContext(data.selectedContext || data.detectedContext)
-  let count = renderSources(data.paths || data)
+  populateContextPicker(data.contextSummary)
+  const count = renderSources(data)
   applyRecommendations(data.recommendations)
-  renderDiagnostics(data.diagnostics || [])
-  if (count === 0) {
+  const commonContexts = data.contextSummary && data.contextSummary.contexts || []
+  if (commonContexts.length === 0 && count > 0) {
+    showWarning('Discovery found historical data, but no context appears on every required path.')
+  } else if (count === 0) {
     showWarning('Discovery completed, but no historical samples matched these metrics, inferred context, sources and time range.')
   } else {
     showOk(`Historical source discovery completed for ${value('context')}: ${count} source entries found.`)
@@ -163,26 +172,85 @@ async function discoverSources () {
 }
 
 function renderSources (data) {
-  const rows = []
-  for (const [path, sources] of Object.entries(data)) {
-    for (const source of sources) {
-      rows.push([
-        path,
-        source.source,
-        source.sampleCount,
-        source.coveragePercent,
-        source.firstSample || '',
-        source.lastSample || '',
-        formatSourceLatest(path, source.latestValue)
-      ])
+  const summary = data.contextSummary || null
+  const selectedPaths = pathsForContext(data, value('context')) || data.paths || {}
+  populateSourcePickers(selectedPaths)
+  document.getElementById('sources').innerHTML = renderContextSummary(summary)
+  return countSourceRows(selectedPaths)
+}
+
+function populateContextPicker (summary) {
+  const select = document.getElementById('context')
+  if (!select || !summary) return
+  const contexts = summary.contexts && summary.contexts.length
+    ? summary.contexts
+    : summary.allContexts || []
+  const previous = select.value
+  select.innerHTML = [
+    '<option value="">Select context</option>',
+    ...contexts.map(context => `<option value="${escapeHtml(context)}">${escapeHtml(context)}</option>`)
+  ].join('')
+  const selected = summary.selectedContext || contexts[0] || ''
+  select.value = contexts.includes(previous) ? previous : selected
+  persistFields()
+}
+
+function renderContextSummary (summary) {
+  if (!summary) return '<p class="muted">No discovery data yet.</p>'
+  const contexts = summary.contexts || []
+  const allContexts = summary.allContexts || []
+  const icon = summary.status === 'ok' ? '✔' : summary.status === 'warning' ? '⚠️' : '❌'
+  const label = contexts.length === 1
+    ? `Context : ${contexts[0]}`
+    : contexts.length > 1
+      ? `Contexts : ${contexts.join(', ')}`
+      : 'Context : none found on every required path'
+  const detailRows = []
+  for (const context of summary.details || []) {
+    for (const pathEntry of context.paths || []) {
+      const sources = pathEntry.sources && pathEntry.sources.length ? pathEntry.sources : [{ source: '', sampleCount: 0, coveragePercent: 0, firstSample: '', lastSample: '' }]
+      for (const source of sources) {
+        detailRows.push([
+          escapeHtml(context.context),
+          escapeHtml(pathEntry.path),
+          escapeHtml(source.source || 'none'),
+          source.sampleCount || 0,
+          formatValue(source.coveragePercent || 0),
+          escapeHtml(source.firstSample || ''),
+          escapeHtml(source.lastSample || '')
+        ])
+      }
     }
   }
-  populateSourcePickers(data)
-  document.getElementById('sources').innerHTML = table(
-    ['Path', 'Source', 'Samples', 'Coverage %', 'First', 'Last', 'Latest'],
-    rows
-  )
-  return rows.length
+  const errors = summary.errors && summary.errors.length
+    ? `<p class="error">${summary.errors.map(error => `${escapeHtml(error.path)}: ${escapeHtml(error.error)}`).join('<br>')}</p>`
+    : ''
+  const details = allContexts.length
+    ? `<details class="advanced compactDetails">
+        <summary>Context source details</summary>
+        ${table(['Context', 'Path', 'Source', 'Samples', 'Coverage %', 'First', 'Last'], detailRows)}
+      </details>`
+    : ''
+  return `
+    <div class="contextSummary ${summary.status}">
+      <span class="contextIcon">${icon}</span>
+      <strong>${escapeHtml(label)}</strong>
+    </div>
+    ${errors}
+    ${details}
+  `
+}
+
+function pathsForContext (discovery, context) {
+  if (!discovery || !discovery.contextSummary || !context) return discovery && discovery.paths || {}
+  const details = discovery.contextSummary.details || []
+  const match = details.find(item => item.context === context)
+  if (!match) return discovery.paths || {}
+  return Object.fromEntries((match.paths || []).map(pathEntry => [pathEntry.path, pathEntry.sources || []]))
+}
+
+function countSourceRows (data) {
+  return Object.values(data || {}).reduce((count, sources) => count + (Array.isArray(sources) ? sources.length : 0), 0)
 }
 
 function mirrorDiscoveryRangeToCalibration () {
@@ -191,34 +259,16 @@ function mirrorDiscoveryRangeToCalibration () {
   persistFields()
 }
 
-function renderDiagnostics (diagnostics) {
-  if (!diagnostics.length) {
-    document.getElementById('diagnostics').innerHTML = ''
-    return
-  }
-  document.getElementById('diagnostics').innerHTML = `
-    <h3>Discovery diagnostics</h3>
-    ${table(
-      ['Path', 'Metric', 'Selector', 'Instant series', 'Range series', 'Samples', 'Contexts', 'Sources for selected context', 'Error'],
-      diagnostics.map(item => [
-        escapeHtml(item.path),
-        escapeHtml(item.metric),
-        `<code>${escapeHtml(item.selector)}</code>`,
-        item.metricSeriesCount,
-        item.rangeSeriesCount,
-        item.rangeSampleCount,
-        escapeHtml((item.contexts || []).join(', ')),
-        escapeHtml((item.sourcesForSelectedContext || []).join(', ')),
-        item.error ? `<span class="error">${escapeHtml(item.error)}</span>` : ''
-      ])
-    )}
-  `
+function ensureContextOption (context) {
+  if (!context) return
+  const select = document.getElementById('context')
+  ensureSelectOption(select, context)
 }
 
-function applyDetectedContext (context) {
-  if (!context) return
-  document.getElementById('context').value = context
-  persistFields()
+function ensureSelectOption (select, optionValue) {
+  if (!select || select.tagName !== 'SELECT' || !optionValue) return
+  if (Array.from(select.options).some(option => option.value === optionValue)) return
+  select.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(optionValue)}">${escapeHtml(optionValue)}</option>`)
 }
 
 function populateSourcePickers (data) {
@@ -289,11 +339,6 @@ function bestSources (sources) {
 
 function sourceScore (source) {
   return Number(source.coveragePercent || 0) * 1000000 + Number(source.sampleCount || 0)
-}
-
-function formatSourceLatest (path, latestValue) {
-  if (path === paths.sog) return `${formatValue(mpsToKnots(latestValue))} kn`
-  return formatValue(latestValue)
 }
 
 async function runCalibration () {
@@ -368,7 +413,6 @@ function renderProfile (profile, target = 'candidate') {
     </div>
     ${profile.warnings && profile.warnings.length ? `<p class="warning">${profile.warnings.map(escapeHtml).join('<br>')}</p>` : ''}
     ${renderCalibrationTimeline(profile, target)}
-    ${renderSegmentSummary(profile.segments || [])}
   `
   document.getElementById(ids.summary).className = 'summary'
   drawCoverageRose(`${target}GlobalCoverage`, binsFromCorrectionTable(profile.correctionTable || []), numberValue('minSamplesPerBin'))
@@ -391,31 +435,6 @@ function renderProfile (profile, target = 'candidate') {
 function profileTargetIds (target) {
   if (target === 'saved') return { summary: 'savedProfile', plot: 'savedPlot', table: 'savedTable' }
   return { summary: 'candidate', plot: 'plot', table: 'table' }
-}
-
-function renderSegmentSummary (segments) {
-  if (!segments.length) return ''
-  return `
-    <h3>Selected periods</h3>
-    ${table(
-      ['From', 'To', 'Moving from', 'Moving to', 'Stable parts', 'Quality', 'Fine step', 'Min SOG', 'Max COG rate', 'SOG median', 'COG rate p90', 'Samples', 'Reason'],
-      segments.map(segment => [
-        escapeHtml(segment.from || ''),
-        escapeHtml(segment.to || ''),
-        escapeHtml(segment.movementFrom || ''),
-        escapeHtml(segment.movementTo || ''),
-        Array.isArray(segment.stableSegments) ? segment.stableSegments.length : '',
-        `<span class="quality-${escapeHtml(segment.quality || 'missing')}">${escapeHtml(segment.quality || '')}</span>`,
-        segment.stats && segment.stats.analysisResolutionSeconds ? `${formatValue(segment.stats.analysisResolutionSeconds)} s` : '',
-        `${formatValue(mpsToKnots(segment.minSog))} kn`,
-        `${formatValue(segment.maxCogRate)} deg/s`,
-        `${formatValue(mpsToKnots(segment.stats && segment.stats.sogMedian))} kn`,
-        `${formatValue(segment.stats && segment.stats.cogRateP90)} deg/s`,
-        segment.stats && segment.stats.samples ? `${formatValue(segment.stats.acceptedSamples || 0)} used / ${formatValue(segment.stats.samples.sog)} SOG / ${formatValue(segment.stats.samples.cog)} COG` : '',
-        escapeHtml(segment.reason || '')
-      ])
-    )}
-  `
 }
 
 function renderCalibrationTimeline (profile, target = 'candidate') {
@@ -463,7 +482,7 @@ function renderNavigationZoom (segment, index, target = 'candidate') {
   const coverageDeg = headingCoverageDeg(segment.headingBins || [])
   const acceptedSamples = segment.stats && segment.stats.acceptedSamples || 0
   return `
-    <details class="periodZoom" ${index === 0 ? 'open' : ''}>
+    <details class="periodZoom">
       <summary>
         <span>Navigation ${index + 1}</span>
         <small>${escapeHtml(formatDateTime(range.from))} - ${escapeHtml(formatDateTime(range.to))} · ${durationMinutes} min · ${acceptedSamples} samples · ${coverageDeg} deg</small>
@@ -478,6 +497,8 @@ function renderNavigationZoom (segment, index, target = 'candidate') {
         ${stableSegments.map(stable => timelineBlock(stable, range, 'stable')).join('')}
       </div>
       <div class="zoomSummary">
+        ${metric('Quality', segment.quality || '')}
+        ${metric('Reason', segment.reason || 'none')}
         ${metric('Stable parts', stableSegments.length)}
         ${metric('Used samples', acceptedSamples)}
         ${metric('Median speed', `${formatValue(mpsToKnots(segment.stats && segment.stats.sogMedian))} kn`)}
@@ -691,9 +712,9 @@ function drawPlot (profile, canvasId = 'plot') {
   const height = canvas.height
   const chart = {
     left: 48,
-    right: width - 22,
+    right: width - 34,
     top: 26,
-    bottom: height - 34
+    bottom: height - 56
   }
   ctx.clearRect(0, 0, width, height)
   ctx.font = '12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
@@ -735,7 +756,7 @@ function drawPlot (profile, canvasId = 'plot') {
   ctx.textBaseline = 'alphabetic'
   ctx.fillText('Correction', chart.left, 16)
   ctx.textAlign = 'right'
-  ctx.fillText('Heading', chart.right, height - 8)
+  ctx.fillText('Heading', chart.right, height - 14)
 
   if (!values.length) return
 
@@ -888,6 +909,7 @@ function restorePersistedFields () {
   for (const [id, fieldValue] of Object.entries(values)) {
     const element = document.getElementById(id)
     if (!element || fieldValue === undefined || fieldValue === null) continue
+    ensureSelectOption(element, fieldValue)
     element.value = fieldValue
     restoredFields.add(id)
   }

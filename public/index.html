@@ -28,10 +28,6 @@
         <h2>Sources</h2>
         <div class="grid">
           <label>
-            Context
-            <input id="context" value="auto" readonly>
-          </label>
-          <label>
             History backend URL
             <input id="baseUrl" value="http://victoriametrics:8428">
           </label>
@@ -77,12 +73,17 @@
           </div>
         </details>
         <div id="sources" class="tableWrap"></div>
-        <div id="diagnostics" class="tableWrap"></div>
       </section>
 
       <section class="panel">
         <h2>Calibration</h2>
         <div class="grid">
+          <label>
+            Context
+            <select id="context">
+              <option value="">Discover sources first</option>
+            </select>
+          </label>
           <label>
             Heading source
             <select id="headingSource"></select>
@@ -108,32 +109,10 @@
             <input id="to" type="datetime-local">
           </label>
         </div>
-        <details class="advanced">
-          <summary>Calibration settings</summary>
-          <div class="grid">
-            <label>
-              Minimum SOG (kn)
-              <input id="minSog" type="number" step="0.1" value="3">
-            </label>
-            <label>
-              Maximum COG rate (deg/s)
-              <input id="maxCogRate" type="number" step="0.1" value="1">
-            </label>
-            <label>
-              Bin size
-              <select id="binSize">
-                <option>5</option>
-                <option selected>10</option>
-                <option>15</option>
-                <option>30</option>
-              </select>
-            </label>
-            <label>
-              Minimum samples per bin
-              <input id="minSamplesPerBin" type="number" min="1" value="10">
-            </label>
-          </div>
-        </details>
+        <input id="minSog" type="hidden" value="3">
+        <input id="maxCogRate" type="hidden" value="1">
+        <input id="binSize" type="hidden" value="10">
+        <input id="minSamplesPerBin" type="hidden" value="10">
         <div class="actions">
           <button id="calibrate" type="button">Run calibration</button>
         </div>
@@ -142,7 +121,7 @@
       <section class="panel">
         <h2>Candidate Review</h2>
         <div id="candidate" class="summary muted">No candidate profile yet.</div>
-        <canvas id="plot" width="720" height="260"></canvas>
+        <canvas id="plot" width="720" height="300"></canvas>
         <div id="table" class="tableWrap"></div>
         <div class="actions">
           <button id="saveCandidate" type="button" disabled>Save table</button>
@@ -159,7 +138,7 @@
         <section class="panel">
           <h2>Calibration Details</h2>
           <div id="savedProfile" class="summary muted">Select a calibration table.</div>
-          <canvas id="savedPlot" width="720" height="260"></canvas>
+          <canvas id="savedPlot" width="720" height="300"></canvas>
           <div id="savedTable" class="tableWrap"></div>
           <div class="actions">
             <button id="deleteProfile" type="button" disabled>Delete table</button>

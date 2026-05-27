@@ -244,7 +244,7 @@ module.exports = function createPlugin (app) {
 
     router.post('/api/discover', asyncRoute(async req => {
       const body = await readBody(req)
-      let provider = makeProvider(body)
+      const provider = makeProvider(body)
       const range = body.range || { from: body.from, to: body.to }
       const paths = body.paths || [
         'navigation.headingMagnetic',
@@ -252,16 +252,15 @@ module.exports = function createPlugin (app) {
         'navigation.speedOverGround',
         'navigation.magneticVariation'
       ]
-      const detectedContext = await provider.detectContextFromPath('navigation.magneticVariation', range, body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS).catch(() => null)
-      if (detectedContext) provider = provider.withContext(detectedContext)
-      const result = await provider.discover(paths, range, body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS)
-      const diagnostics = await Promise.all(paths.map(path => provider.diagnosePath(path, range, body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS)))
-      const recommendations = await buildRecommendations(provider, result, range).catch(error => ({ error: error.message }))
+      const resolutionSeconds = body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS
+      const discovery = await discoverHistoricalContexts(provider, paths, range, resolutionSeconds)
+      const recommendations = discovery.contextSummary.selectedContext
+        ? await buildRecommendations(provider.withContext(discovery.contextSummary.selectedContext), discovery.paths, range).catch(error => ({ error: error.message }))
+        : { error: 'No common context found across required paths' }
       return {
-        detectedContext,
-        selectedContext: provider.context,
-        paths: result,
-        diagnostics,
+        selectedContext: discovery.contextSummary.selectedContext,
+        contextSummary: discovery.contextSummary,
+        paths: discovery.paths,
         recommendations
       }
     }))
@@ -847,6 +846,111 @@ function mergeOptions (base, override) {
 
 function structuredCloneSafe (value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+async function discoverHistoricalContexts (provider, paths, range, resolutionSeconds) {
+  const rows = []
+  const errors = []
+  const pathContexts = new Map(paths.map(path => [path, new Set()]))
+  const expected = expectedSampleCount(range, resolutionSeconds)
+
+  for (const path of paths) {
+    const metric = provider.metricForPath(path)
+    let result
+    try {
+      result = await provider.queryRange(metric, range, resolutionSeconds)
+    } catch (error) {
+      errors.push({ path, metric, error: error.message })
+      continue
+    }
+
+    for (const series of result) {
+      const labels = series.metric || {}
+      const context = labels.context || ''
+      if (!context) continue
+      const samples = normalizePrometheusValues(series.values)
+      if (!samples.length) continue
+      pathContexts.get(path).add(context)
+      const latest = samples[samples.length - 1]
+      rows.push({
+        path,
+        metric,
+        context,
+        source: labels.source || '',
+        sampleCount: samples.length,
+        coveragePercent: expected ? Math.min(100, Math.round(samples.length / expected * 1000) / 10) : 0,
+        firstSample: new Date(samples[0].t).toISOString(),
+        lastSample: new Date(latest.t).toISOString(),
+        latestValue: latest.value
+      })
+    }
+  }
+
+  const allContexts = unique(rows.map(row => row.context).filter(Boolean))
+  const commonContexts = allContexts.filter(context => paths.every(path => pathContexts.get(path).has(context)))
+  const selectedContext = commonContexts[0] || allContexts[0] || null
+  const status = commonContexts.length === 1
+    ? 'ok'
+    : commonContexts.length === 0
+      ? 'error'
+      : 'warning'
+  const details = allContexts.map(context => ({
+    context,
+    paths: paths.map(path => ({
+      path,
+      sources: sortCoverageRows(rows.filter(row => row.context === context && row.path === path))
+    }))
+  }))
+
+  return {
+    contextSummary: {
+      status,
+      contexts: commonContexts,
+      allContexts,
+      selectedContext,
+      errors,
+      details
+    },
+    paths: rowsByPathForContext(rows, paths, selectedContext)
+  }
+}
+
+function rowsByPathForContext (rows, paths, context) {
+  const result = {}
+  for (const path of paths) {
+    result[path] = context ? sortCoverageRows(rows.filter(row => row.context === context && row.path === path)) : []
+  }
+  return result
+}
+
+function sortCoverageRows (rows) {
+  return [...rows].sort((a, b) => {
+    const scoreA = Number(a.coveragePercent || 0) * 1000000 + Number(a.sampleCount || 0)
+    const scoreB = Number(b.coveragePercent || 0) * 1000000 + Number(b.sampleCount || 0)
+    return scoreB - scoreA
+  })
+}
+
+function normalizePrometheusValues (values) {
+  return (values || [])
+    .map(([timestamp, value]) => ({
+      t: Number(timestamp) * 1000,
+      value: Number(value)
+    }))
+    .filter(sample => Number.isFinite(sample.t) && Number.isFinite(sample.value))
+    .sort((a, b) => a.t - b.t)
+}
+
+function expectedSampleCount (range, resolutionSeconds) {
+  const from = new Date(range.from).getTime()
+  const to = new Date(range.to).getTime()
+  const resolution = Number(resolutionSeconds || 1)
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from || !Number.isFinite(resolution) || resolution <= 0) return 0
+  return Math.max(Math.floor((to - from) / 1000 / resolution) + 1, 1)
+}
+
+function unique (values) {
+  return Array.from(new Set(values))
 }
 
 function addSegment (segments, start, end, rangeFrom, rangeTo, paddingMs, minDurationSeconds) {
