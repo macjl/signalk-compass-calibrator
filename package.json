@@ -35,6 +35,9 @@
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
     "displayName": "Compass Calibrator",
-    "appIcon": "./icon.svg"
+    "appIcon": "./public/icon.svg",
+    "screenshots": [
+      "./public/screenshot.png"
+    ]
   }
 }
