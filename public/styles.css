@@ -222,6 +222,32 @@ select {
   font-size: 18px;
 }
 
+.runtimeGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.runtimeMetric {
+  border-left: 3px solid var(--line);
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding-left: 10px;
+}
+
+.runtimeMetric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runtimeMetric strong {
+  font-size: 16px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .tableWrap {
   overflow: auto;
   margin-top: 14px;

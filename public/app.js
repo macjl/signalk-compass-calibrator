@@ -5,10 +5,12 @@ let restoredFields = new Set()
 let savedProfiles = []
 let selectedProfile = null
 let lastDiscovery = null
+let runtimePollTimer = null
 
 const STORAGE_KEY = 'signalk-compass-calibrator.settings.v2'
 const SECRET_STORAGE_KEY = 'signalk-compass-calibrator.sessionSecrets.v1'
 const MPS_TO_KNOTS = 1.9438444924406
+const RUNTIME_POLL_MS = 2000
 
 const paths = {
   heading: 'navigation.headingMagnetic',
@@ -91,6 +93,20 @@ function showTab (id) {
       await loadSources()
     })
   }
+  updateRuntimePolling(id === 'runtimeTab')
+}
+
+function updateRuntimePolling (enabled) {
+  if (runtimePollTimer) {
+    clearInterval(runtimePollTimer)
+    runtimePollTimer = null
+  }
+  if (!enabled) return
+  runtimePollTimer = setInterval(() => {
+    loadRuntime({ updatePickers: false }).catch(error => {
+      console.warn('Runtime refresh failed', error)
+    })
+  }, RUNTIME_POLL_MS)
 }
 
 function setDefaultDates () {
@@ -510,22 +526,26 @@ function timelineBlock (segment, range, type) {
   return `<span class="timelineBlock ${type}" style="left:${left}%;width:${width}%" title="${escapeHtml(formatDateTime(segmentRange.from))} - ${escapeHtml(formatDateTime(segmentRange.to))}"></span>`
 }
 
-async function loadRuntime () {
+async function loadRuntime (options = {}) {
+  const updatePickers = options.updatePickers !== false
   const data = await api('/api/runtime')
-  populateRuntimeProfiles(data.profiles || savedProfiles, data.activeProfileId)
-  populateRuntimeSources(data.liveSources || [], data.activeInputSource)
-  if (data.activeProfileId) document.getElementById('runtimeProfile').value = data.activeProfileId
-  if (data.activeInputSource) document.getElementById('runtimeSource').value = data.activeInputSource
+  if (updatePickers) {
+    populateRuntimeProfiles(data.profiles || savedProfiles, data.activeProfileId)
+    populateRuntimeSources(data.liveSources || [], data.activeInputSource)
+    if (data.activeProfileId) document.getElementById('runtimeProfile').value = data.activeProfileId
+    if (data.activeInputSource) document.getElementById('runtimeSource').value = data.activeInputSource
+  }
+  const activeProfile = data.activeProfile && (data.activeProfile.displayName || data.activeProfile.savedAt || data.activeProfile.id) || data.activeProfileId || 'none'
   document.getElementById('runtime').innerHTML = `
-    <div class="summaryGrid">
-      ${metric('Status', data.status)}
-      ${metric('Active profile', data.activeProfileId || 'none')}
-      ${metric('Input source', data.activeInputSource || data.inputSource || 'none')}
-      ${metric('Raw heading', `${formatValue(data.lastRawHeadingDeg)} deg`)}
-      ${metric('Correction', `${formatValue(data.lastCorrectionDeg)} deg`)}
-      ${metric('Calibrated', `${formatValue(data.lastCalibratedHeadingDeg)} deg`)}
-      ${metric('Last input', data.lastInputAt || 'none')}
-      ${metric('Last publish', data.lastPublishedAt || 'none')}
+    <div class="runtimeGrid">
+      ${runtimeMetric('Status', data.status)}
+      ${runtimeMetric('Active profile', activeProfile)}
+      ${runtimeMetric('Input source', data.activeInputSource || data.inputSource || 'none')}
+      ${runtimeMetric('Raw heading', `${formatValue(data.lastRawHeadingDeg)} deg`)}
+      ${runtimeMetric('Correction', `${formatValue(data.lastCorrectionDeg)} deg`)}
+      ${runtimeMetric('Calibrated', `${formatValue(data.lastCalibratedHeadingDeg)} deg`)}
+      ${runtimeMetric('Last input', formatRuntimeDate(data.lastInputAt))}
+      ${runtimeMetric('Last publish', formatRuntimeDate(data.lastPublishedAt))}
     </div>
   `
 }
@@ -861,6 +881,10 @@ function metric (label, value) {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`
 }
 
+function runtimeMetric (label, value) {
+  return `<div class="runtimeMetric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value || 'none'))}</strong></div>`
+}
+
 function value (id) {
   return document.getElementById(id).value.trim()
 }
@@ -959,6 +983,13 @@ function formatDateTime (input) {
   const date = new Date(input)
   if (Number.isNaN(date.getTime())) return ''
   return date.toISOString().slice(0, 16).replace('T', ' ')
+}
+
+function formatRuntimeDate (input) {
+  if (!input) return 'none'
+  const date = new Date(input)
+  if (Number.isNaN(date.getTime())) return String(input)
+  return date.toISOString().slice(0, 19).replace('T', ' ')
 }
 
 function headingCoverageDeg (bins) {
