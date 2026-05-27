@@ -14,13 +14,12 @@
           <h1>Compass Calibrator</h1>
           <p>Batch-calibrate a selected magnetic heading source from source-aware historical data.</p>
         </div>
-        <button id="refreshRuntime" type="button">Refresh</button>
       </header>
       <div id="message" class="message" hidden></div>
 
       <nav class="tabs" aria-label="Main sections">
-        <button class="tabButton active" type="button" data-tab="calibrationTab">Calibration</button>
-        <button class="tabButton" type="button" data-tab="calibrationsTab">Calibrations</button>
+        <button class="tabButton active" type="button" data-tab="calibrationTab">Calibrate</button>
+        <button class="tabButton" type="button" data-tab="calibrationsTab">Calibrations Store</button>
         <button class="tabButton" type="button" data-tab="runtimeTab">Runtime</button>
       </nav>
 
@@ -122,7 +121,7 @@
       <section class="panel">
         <h2>Candidate Review</h2>
         <div id="candidate" class="summary muted">No candidate profile yet.</div>
-        <canvas id="plot" width="720" height="300"></canvas>
+        <canvas id="plot" width="760" height="340"></canvas>
         <div id="table" class="tableWrap"></div>
         <div class="actions">
           <button id="saveCandidate" type="button" disabled>Save table</button>
@@ -139,7 +138,7 @@
         <section class="panel">
           <h2>Calibration Details</h2>
           <div id="savedProfile" class="summary muted">Select a calibration table.</div>
-          <canvas id="savedPlot" width="720" height="300"></canvas>
+          <canvas id="savedPlot" width="760" height="340"></canvas>
           <div id="savedTable" class="tableWrap"></div>
           <div class="actions">
             <button id="deleteProfile" type="button" disabled>Delete table</button>

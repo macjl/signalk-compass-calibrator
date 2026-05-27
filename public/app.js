@@ -68,14 +68,6 @@ function bindEvents () {
   })
   document.getElementById('deleteProfile').addEventListener('click', () => runAction('Delete failed', deleteSelectedProfile))
   document.getElementById('activateRuntime').addEventListener('click', () => runAction('Runtime activation failed', activateRuntime))
-  document.getElementById('refreshRuntime').addEventListener('click', () => {
-    runAction('Refresh failed', async () => {
-      await loadProfiles()
-      await loadRuntime()
-      await loadSources()
-      showOk('Runtime refreshed.')
-    })
-  })
 }
 
 function bindTabs () {
@@ -711,10 +703,10 @@ function drawPlot (profile, canvasId = 'plot') {
   const width = canvas.width
   const height = canvas.height
   const chart = {
-    left: 48,
-    right: width - 34,
+    left: 78,
+    right: width - 64,
     top: 26,
-    bottom: height - 56
+    bottom: height - 78
   }
   ctx.clearRect(0, 0, width, height)
   ctx.font = '12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
@@ -748,7 +740,7 @@ function drawPlot (profile, canvasId = 'plot') {
     ctx.fillStyle = '#65716b'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'top'
-    ctx.fillText(`${heading} deg`, x, chart.bottom + 8)
+    ctx.fillText(`${heading} deg`, x, chart.bottom + 10)
   }
 
   ctx.fillStyle = '#65716b'
@@ -756,7 +748,7 @@ function drawPlot (profile, canvasId = 'plot') {
   ctx.textBaseline = 'alphabetic'
   ctx.fillText('Correction', chart.left, 16)
   ctx.textAlign = 'right'
-  ctx.fillText('Heading', chart.right, height - 14)
+  ctx.fillText('Heading', chart.right, height - 20)
 
   if (!values.length) return
 
