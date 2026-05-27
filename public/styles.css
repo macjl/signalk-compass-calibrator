@@ -42,9 +42,41 @@ button:hover {
   background: var(--accent-strong);
 }
 
+button.secondary {
+  background: #e8eeea;
+  color: var(--text);
+}
+
+button.secondary:hover {
+  background: #d8e2de;
+}
+
 button:disabled {
   background: #9facab;
   cursor: not-allowed;
+}
+
+button.busy {
+  position: relative;
+}
+
+button.busy::after {
+  content: "";
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-left: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  border-top-color: #fff;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .shell {
@@ -179,9 +211,16 @@ select {
 
 .actions {
   display: flex;
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
   margin-top: 14px;
+}
+
+.inlineStatus {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .advanced {

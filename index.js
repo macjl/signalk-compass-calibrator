@@ -6,6 +6,7 @@ const { calibrate, compileCalibrationProfile, correctionForCompiledProfile } = r
 const { wrap360Rad, wrap180Deg, radToDeg } = require('./lib/angles')
 const { DEFAULT_METRICS, PrometheusHistoryProvider } = require('./lib/prometheus-history-provider')
 const { createProfileStore } = require('./lib/profile-store')
+const { buildSchema } = require('./lib/plugin-schema')
 
 const PLUGIN_ID = 'compass-calibrator'
 const PUBLISH_SOURCE = 'signalk-compass-calibrator'
@@ -381,6 +382,18 @@ module.exports = function createPlugin (app) {
         activeInputSource: getRuntimeInputSource()
       }
     }))
+
+    router.post('/api/runtime/disable', asyncRoute(async () => {
+      store.configureRuntime(null, null)
+      setActiveProfile(null)
+      runtime.status = statusFromState()
+      setPluginStatus()
+      return {
+        ...runtime,
+        activeProfile: null,
+        activeInputSource: null
+      }
+    }))
   }
 
   function makeProvider (body = {}) {
@@ -663,7 +676,7 @@ module.exports = function createPlugin (app) {
   }
 
   function getRuntimeInputSource () {
-    return store && store.activeInputSource() || options.sources.heading || activeRuntimeProfile && activeRuntimeProfile.source || activeProfile && activeProfile.sources && activeProfile.sources.heading
+    return store && store.activeInputSource() || null
   }
 
   function setActiveProfile (profile) {
@@ -702,81 +715,6 @@ module.exports = function createPlugin (app) {
       if (statusText !== lastPluginStatus) {
         app.setPluginStatus(statusText)
         lastPluginStatus = statusText
-      }
-    }
-  }
-}
-
-function buildSchema () {
-  return {
-    type: 'object',
-    properties: {
-      enabled: { type: 'boolean', title: 'Enable plugin', default: true },
-      prometheus: {
-        type: 'object',
-        title: 'Prometheus compatible history backend',
-        properties: {
-          baseUrl: { type: 'string', title: 'Base URL', default: DEFAULT_OPTIONS.prometheus.baseUrl },
-          type: { type: 'string', title: 'Backend type', default: 'victoriametrics' },
-          auth: {
-            type: 'object',
-            title: 'Authentication',
-            properties: {
-              type: { type: 'string', title: 'Type', default: 'basic', enum: ['basic'] },
-              username: { type: 'string', title: 'Username' },
-              password: { type: 'string', title: 'Password' }
-            }
-          }
-        }
-      },
-      context: { type: 'string', title: 'Signal K context', default: 'vessels.self' },
-      metrics: {
-        type: 'object',
-        title: 'Metric names',
-        properties: Object.fromEntries(Object.entries(DEFAULT_METRICS).map(([key, value]) => [
-          key,
-          { type: 'string', default: value }
-        ]))
-      },
-      sources: {
-        type: 'object',
-        title: 'Input sources',
-        properties: {
-          heading: { type: 'string', title: 'Raw heading source' },
-          cog: { type: 'string', title: 'COG source' },
-          sog: { type: 'string', title: 'SOG source' },
-          variation: { type: 'string', title: 'Magnetic variation source' }
-        }
-      },
-      filters: {
-        type: 'object',
-        title: 'Calibration filters',
-        properties: {
-          minSog: { type: 'number', title: 'Minimum SOG (m/s)', default: 1.5 },
-          maxCogRate: { type: 'number', title: 'Maximum COG rate (deg/s)', default: 1 },
-          maxSampleGapSeconds: { type: 'number', title: 'Maximum sample gap (s)', default: 2 },
-          minSegmentDuration: { type: 'number', title: 'Minimum segment duration (s)', default: 30 },
-          minSamplesPerBin: { type: 'number', title: 'Minimum samples per bin', default: 10 }
-        }
-      },
-      calibration: {
-        type: 'object',
-        title: 'Calibration',
-        properties: {
-          binSize: { type: 'number', title: 'Bin size (deg)', default: 10, enum: [5, 10, 15, 30] },
-          smoothing: { type: 'boolean', title: 'Smoothing', default: true },
-          interpolation: { type: 'string', title: 'Interpolation', default: 'linear-circular' }
-        }
-      },
-      publishing: {
-        type: 'object',
-        title: 'Publishing',
-        properties: {
-          enabled: { type: 'boolean', title: 'Publish corrected heading', default: true },
-          source: { type: 'string', title: 'Publish source', default: PUBLISH_SOURCE },
-          path: { type: 'string', title: 'Publish path', default: PUBLISH_PATH },
-          staleAfterSeconds: { type: 'number', title: 'Input stale after (s)', default: 10 }
-        }
       }
     }
   }

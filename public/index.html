@@ -50,6 +50,7 @@
         </div>
         <div class="actions">
           <button id="discover" type="button">Discover historical sources</button>
+          <span id="discoverStatus" class="inlineStatus" hidden>Discovering historical sources...</span>
         </div>
         <details class="advanced">
           <summary>Metric names</summary>
@@ -115,6 +116,7 @@
         <input id="minSamplesPerBin" type="hidden" value="10">
         <div class="actions">
           <button id="calibrate" type="button">Run calibration</button>
+          <span id="calibrateStatus" class="inlineStatus" hidden>Calibration running...</span>
         </div>
       </section>
 
@@ -161,6 +163,8 @@
         </div>
         <div class="actions">
           <button id="activateRuntime" type="button">Activate runtime calibration</button>
+          <button id="deactivateRuntime" class="secondary" type="button">Deactivate runtime calibration</button>
+          <span id="runtimeActionStatus" class="inlineStatus" hidden>Updating runtime...</span>
         </div>
       </section>
       <section class="panel">

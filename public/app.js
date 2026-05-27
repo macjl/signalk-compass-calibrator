@@ -55,12 +55,12 @@ loadProfiles().catch(showError)
 function bindEvents () {
   bindPersistence()
   bindTabs()
-  document.getElementById('discover').addEventListener('click', () => runAction('Discover failed', discoverSources))
+  document.getElementById('discover').addEventListener('click', () => runBusyAction('discover', 'discoverStatus', 'Discovering...', 'Discover failed', discoverSources))
   document.getElementById('context').addEventListener('change', () => {
     populateSourcePickers(pathsForContext(lastDiscovery, value('context')))
     persistFields()
   })
-  document.getElementById('calibrate').addEventListener('click', () => runAction('Calibration failed', runCalibration))
+  document.getElementById('calibrate').addEventListener('click', () => runBusyAction('calibrate', 'calibrateStatus', 'Calibrating...', 'Calibration failed', runCalibration))
   document.getElementById('saveCandidate').addEventListener('click', () => runAction('Save failed', saveCandidate))
   document.getElementById('cancelCandidate').addEventListener('click', cancelCandidate)
   document.getElementById('profilesList').addEventListener('click', event => {
@@ -69,7 +69,8 @@ function bindEvents () {
     if (action === 'view' && id) runAction('Load failed', () => loadProfileDetails(id))
   })
   document.getElementById('deleteProfile').addEventListener('click', () => runAction('Delete failed', deleteSelectedProfile))
-  document.getElementById('activateRuntime').addEventListener('click', () => runAction('Runtime activation failed', activateRuntime))
+  document.getElementById('activateRuntime').addEventListener('click', () => runBusyAction('activateRuntime', 'runtimeActionStatus', 'Activating...', 'Runtime activation failed', activateRuntime))
+  document.getElementById('deactivateRuntime').addEventListener('click', () => runBusyAction('deactivateRuntime', 'runtimeActionStatus', 'Deactivating...', 'Runtime deactivation failed', deactivateRuntime))
 }
 
 function bindTabs () {
@@ -558,6 +559,14 @@ async function activateRuntime () {
   showOk('Runtime calibration activated.')
 }
 
+async function deactivateRuntime () {
+  await api('/api/runtime/disable', {})
+  document.getElementById('runtimeProfile').value = ''
+  document.getElementById('runtimeSource').value = ''
+  await loadRuntime()
+  showOk('Runtime calibration deactivated.')
+}
+
 function renderProfilesList (profiles, activeProfileId) {
   document.getElementById('profilesList').innerHTML = table(
     ['Saved at', 'State', 'Samples', 'Coverage', 'Stddev', 'Action'],
@@ -655,6 +664,28 @@ async function runAction (fallback, action) {
     await action()
   } catch (error) {
     showError(error, fallback)
+  }
+}
+
+async function runBusyAction (buttonId, statusId, busyText, fallback, action) {
+  const button = document.getElementById(buttonId)
+  const status = document.getElementById(statusId)
+  const previousText = button ? button.textContent : ''
+  if (button) {
+    button.disabled = true
+    button.classList.add('busy')
+    button.textContent = busyText
+  }
+  if (status) status.hidden = false
+  try {
+    await runAction(fallback, action)
+  } finally {
+    if (button) {
+      button.disabled = false
+      button.classList.remove('busy')
+      button.textContent = previousText
+    }
+    if (status) status.hidden = true
   }
 }
 
