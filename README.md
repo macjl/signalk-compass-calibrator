@@ -29,6 +29,8 @@ npm install github:macjl/signalk-compass-calibrator
 
 Then enable the plugin from the Signal K plugin configuration UI.
 
+After restarting Signal K, open the app from the Admin UI Web Apps menu. It is registered as an embeddable webapp, so the Signal K admin navigation stays visible while the calibrator runs in the content area.
+
 ## Configuration
 
 The plugin exposes settings for:
