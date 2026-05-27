@@ -1,11 +1,18 @@
 {
   "name": "signalk-compass-calibrator",
-  "version": "0.1.25",
+  "version": "0.2.0",
   "description": "Signal K plugin that calibrates magnetic heading from source-aware historical navigation data.",
   "main": "index.js",
   "scripts": {
     "test": "node --test"
   },
+  "files": [
+    "index.js",
+    "lib",
+    "public",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "keywords": [
     "signalk-node-server-plugin",
     "signalk-embeddable-webapp",

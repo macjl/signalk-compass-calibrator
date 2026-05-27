@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.1.25] - 2026-05-27
+## [0.2.0] - 2026-05-27
 
-Initial public testing release.
+Initial public release.
 
 ### Added
 
