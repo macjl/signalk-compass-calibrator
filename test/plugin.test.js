@@ -119,6 +119,45 @@ test('plugin rejects learning when input timestamps are not aligned', async () =
   }
 })
 
+test('plugin accepts stale magnetic variation when dynamic inputs are fresh and aligned', async () => {
+  let callback = null
+  const app = fakeApp({
+    subscribe: (subscription, unsubscribes, errorHandler, subscribedCallback) => {
+      callback = subscribedCallback
+    }
+  })
+  const plugin = createPlugin(app)
+  try {
+    plugin.start({
+      filters: {
+        startupDelaySeconds: 0,
+        minSog: 0,
+        maxCogRate: 2,
+        maxHeadingRate: 2,
+        maxSampleAgeSeconds: 3,
+        maxSampleSkewSeconds: 2
+      }
+    })
+    await setLearning(plugin, true)
+
+    const now = Date.now()
+    callback(delta([
+      update('navigation.magneticVariation', 3, now - 600000)
+    ]))
+    callback(delta([
+      update('navigation.headingMagnetic', 100, now),
+      update('navigation.courseOverGroundTrue', 102, now),
+      update('navigation.speedOverGround', 4, now, { raw: true })
+    ]))
+
+    const state = await getState(plugin)
+    assert.equal(state.runtime.acceptedSamples, 1)
+    assert.equal(state.runtime.lastRejectReason, null)
+  } finally {
+    plugin.stop()
+  }
+})
+
 test('plugin rejects learning when magnetic heading changes too fast', async () => {
   let callback = null
   const app = fakeApp({

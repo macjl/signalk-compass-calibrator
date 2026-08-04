@@ -39,7 +39,7 @@ Publication is always active when the plugin is enabled. If the table is empty, 
 published HDG = source HDG
 ```
 
-Enable learning only when underway in suitable conditions. The plugin rejects learning samples while inputs are missing, stale, below the SOG threshold, not timestamp-aligned, or when COG/HDG is unstable. These learning filters are exposed in the plugin configuration with conservative defaults.
+Enable learning only when underway in suitable conditions. The plugin rejects learning samples while inputs are missing, HDG/COG/SOG are stale or not timestamp-aligned, SOG is below the threshold, or COG/HDG is unstable. Magnetic variation must be present, but it does not need to be refreshed frequently. These learning filters are exposed in the plugin configuration with conservative defaults.
 
 Default runtime output:
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1] - 2026-08-04
+
+### Fixed
+
+- Require magnetic variation for learning without rejecting it when it is older than HDG, COG, and SOG samples.
+
 ## [0.3.0] - 2026-08-04
 
 ### Changed

@@ -207,10 +207,11 @@ module.exports = function createPlugin (app) {
     if (!variation) missing.push('variation')
     if (missing.length) return { ok: false, reason: `missing ${missing.join(', ')}` }
 
-    const stale = [heading, cog, sog, variation].filter(input => (now - input.timestamp) / 1000 > options.filters.maxSampleAgeSeconds)
+    const dynamicInputs = [heading, cog, sog]
+    const stale = dynamicInputs.filter(input => (now - input.timestamp) / 1000 > options.filters.maxSampleAgeSeconds)
     if (stale.length) return { ok: false, reason: `stale ${stale.map(input => input.path).join(', ')}` }
 
-    const sampleSkewSeconds = inputTimestampSkewSeconds([heading, cog, sog, variation])
+    const sampleSkewSeconds = inputTimestampSkewSeconds(dynamicInputs)
     if (sampleSkewSeconds > options.filters.maxSampleSkewSeconds) {
       return { ok: false, reason: 'input timestamps are not aligned' }
     }
