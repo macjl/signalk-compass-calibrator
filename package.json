@@ -1,13 +1,14 @@
 {
   "name": "signalk-compass-calibrator",
-  "version": "0.2.0",
-  "description": "Signal K plugin that calibrates magnetic heading from source-aware historical navigation data.",
+  "version": "0.3.0",
+  "description": "Signal K plugin that learns and publishes live magnetic heading corrections.",
   "main": "index.js",
   "scripts": {
     "test": "node --test"
   },
   "files": [
     "index.js",
+    "icon.svg",
     "lib",
     "public",
     "README.md",
@@ -21,8 +22,8 @@
     "signalk",
     "compass",
     "calibration",
-    "victoriametrics",
-    "prometheus"
+    "heading-correction",
+    "learning"
   ],
   "author": "Jean-Laurent Girod (@macjl)",
   "license": "Apache-2.0",
@@ -42,7 +43,7 @@
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
     "displayName": "Compass Calibrator",
-    "appIcon": "./public/icon.svg",
+    "appIcon": "./icon.svg",
     "screenshots": [
       "./public/screenshot.png"
     ]

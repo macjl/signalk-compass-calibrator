@@ -2,89 +2,37 @@
 
 const fs = require('fs')
 const path = require('path')
-const { calibrate, compileCalibrationProfile, correctionForCompiledProfile } = require('./lib/calibration')
+const { DEFAULT_OPTIONS, INPUT_PATHS, PUBLISH_PATH } = require('./lib/default-options')
+const { createTableStore } = require('./lib/table-store')
+const {
+  normalizeTable,
+  updateTableWithObservation,
+  setManualCorrection,
+  resetSector,
+  setSectorLocked,
+  correctionForHeadingRad,
+  summarizeTable
+} = require('./lib/correction-table')
 const { wrap360Rad, wrap180Deg, radToDeg } = require('./lib/angles')
-const { DEFAULT_METRICS, PrometheusHistoryProvider } = require('./lib/prometheus-history-provider')
-const { createProfileStore } = require('./lib/profile-store')
 const { buildSchema } = require('./lib/plugin-schema')
 
 const PLUGIN_ID = 'compass-calibrator'
-const PUBLISH_SOURCE = 'signalk-compass-calibrator'
-const PUBLISH_PATH = 'navigation.headingMagnetic'
-const DISCOVERY_RESOLUTION_SECONDS = 30
-const FINE_CALIBRATION_RESOLUTION_SECONDS = 1
-const MAX_COARSE_SCAN_RESOLUTION_SECONDS = 60
-const SEGMENT_BOUNDARY_PADDING_SECONDS = 60
-const STABLE_COG_WINDOW_SECONDS = 15
-const STABLE_COG_MIN_DURATION_SECONDS = 30
-const STABLE_COG_MERGE_GAP_SECONDS = 5
-const HEADING_COVERAGE_BIN_DEG = 10
-
-const DEFAULT_OPTIONS = {
-  enabled: true,
-  prometheus: {
-    baseUrl: 'http://victoriametrics:8428',
-    type: 'victoriametrics',
-    auth: {
-      type: 'basic',
-      username: '',
-      password: ''
-    }
-  },
-  context: 'vessels.self',
-  metrics: DEFAULT_METRICS,
-  sources: {
-    heading: '',
-    cog: '',
-    sog: '',
-    variation: ''
-  },
-  filters: {
-    minSog: 1.5,
-    maxCogRate: 1,
-    maxSampleGapSeconds: 2,
-    minSegmentDuration: 30,
-    minSamplesPerBin: 10
-  },
-  calibration: {
-    binSize: 10,
-    smoothing: true,
-    interpolation: 'linear-circular'
-  },
-  publishing: {
-    enabled: true,
-    source: PUBLISH_SOURCE,
-    path: PUBLISH_PATH,
-    staleAfterSeconds: 10
-  }
-}
 
 module.exports = function createPlugin (app) {
-  let options = { ...DEFAULT_OPTIONS }
-  let store
+  let options = mergeOptions(DEFAULT_OPTIONS, {})
+  let store = null
+  let table = null
   let unsubscribes = []
-  let deltaListener = null
-  let activeProfile = null
-  let activeRuntimeProfile = null
   let staleTimer = null
-  let lastPluginStatus = null
-  const liveSources = new Map()
-  const runtime = {
-    status: 'inactive',
-    activeProfileId: null,
-    inputSource: null,
-    lastRawHeading: null,
-    lastCorrection: null,
-    lastCalibratedHeading: null,
-    lastInputAt: null,
-    lastPublishedAt: null,
-    warnings: []
-  }
+  let startedAt = 0
+  let lastSaveAt = 0
+  const inputs = new Map()
+  const runtime = createRuntimeState()
 
   const plugin = {
     id: PLUGIN_ID,
     name: 'Compass Calibrator',
-    description: 'Calibrate a selected magnetic heading source using source-aware historical COG/SOG/variation data.',
+    description: 'Live heading correction learning for Signal K magnetic heading data.',
     schema: buildSchema,
     start,
     stop,
@@ -95,19 +43,20 @@ module.exports = function createPlugin (app) {
 
   function start (pluginOptions) {
     options = mergeOptions(DEFAULT_OPTIONS, pluginOptions || {})
-    store = createProfileStore(app, PLUGIN_ID)
+    store = createTableStore(app, PLUGIN_ID, options.table)
     store.load()
-    setActiveProfile(store.active())
-    runtime.status = statusFromState()
-
-    if (options.enabled && options.publishing.enabled) {
-      subscribeToHeading()
-      staleTimer = setInterval(checkStaleInput, 1000)
-    }
+    table = normalizeTable(store.table(), options.table)
+    startedAt = Date.now()
+    lastSaveAt = 0
+    runtime.learningEnabled = store.learningEnabled()
+    runtime.status = 'starting'
+    subscribeToInputs()
+    staleTimer = setInterval(checkStaleInput, 1000)
     setPluginStatus()
   }
 
   function stop () {
+    if (store && table) store.setTable(table)
     for (const unsubscribe of unsubscribes) {
       try {
         if (typeof unsubscribe === 'function') unsubscribe()
@@ -116,93 +65,92 @@ module.exports = function createPlugin (app) {
       }
     }
     unsubscribes = []
-    if (deltaListener && typeof app.removeListener === 'function') {
-      app.removeListener('delta', deltaListener)
-    }
-    deltaListener = null
     if (staleTimer) clearInterval(staleTimer)
     staleTimer = null
-    runtime.status = 'inactive'
-    activeRuntimeProfile = null
+    runtime.status = 'stopped'
     setPluginStatus()
   }
 
-  function subscribeToHeading () {
+  function subscribeToInputs () {
     const subscription = {
       context: options.context || 'vessels.self',
-      sourcePolicy: 'all',
+      excludeSelf: true,
       subscribe: [
-        {
-          path: PUBLISH_PATH,
-          period: 500
-        }
+        { path: INPUT_PATHS.heading, period: 500 },
+        { path: INPUT_PATHS.cog, period: 500 },
+        { path: INPUT_PATHS.sog, period: 500 },
+        { path: INPUT_PATHS.variation, period: 1000 }
       ]
     }
 
-    if (app.subscriptionmanager && typeof app.subscriptionmanager.subscribe === 'function') {
-      app.subscriptionmanager.subscribe(
-        subscription,
-        unsubscribes,
-        error => {
-          runtime.status = 'error'
-          app.error && app.error(`Compass calibrator subscription failed: ${error.message || error}`)
-        },
-        handleDelta
-      )
+    if (!app.subscriptionmanager || typeof app.subscriptionmanager.subscribe !== 'function') {
+      runtime.status = 'error'
+      runtime.lastRejectReason = 'Signal K subscription manager is not available'
+      setPluginStatus()
       return
     }
 
-    if (typeof app.on === 'function') {
-      deltaListener = handleDelta
-      app.on('delta', deltaListener)
-    }
+    app.subscriptionmanager.subscribe(
+      subscription,
+      unsubscribes,
+      error => {
+        runtime.status = 'error'
+        runtime.lastRejectReason = error && error.message || String(error)
+        setPluginStatus()
+      },
+      handleDelta
+    )
   }
 
   function handleDelta (delta) {
+    const now = Date.now()
     for (const update of delta.updates || []) {
-      const source = update.$source || update.source && update.source.label
-      if (!source || source === options.publishing.source) continue
-      recordLiveSource(source, update.values || [])
-
-      const configuredSource = getRuntimeInputSource()
-      if (!configuredSource || source !== configuredSource) continue
-
-      const headingValue = (update.values || []).find(value => value.path === PUBLISH_PATH)
-      if (!headingValue || !Number.isFinite(headingValue.value)) continue
-
-      runtime.lastInputAt = new Date().toISOString()
-      runtime.inputSource = source
-      runtime.lastRawHeading = headingValue.value
-      publishCorrectedHeading(source, headingValue.value)
+      const source = sourceRef(update)
+      const timestamp = normalizeTimestamp(update.timestamp) || now
+      for (const item of update.values || []) {
+        if (!isInputPath(item.path) || !Number.isFinite(item.value)) continue
+        updateInput(item.path, item.value, source, timestamp)
+        if (item.path === INPUT_PATHS.heading) publishCorrectedHeading(item.value, source, timestamp)
+      }
     }
+    if (runtime.learningEnabled) learnFromCurrentInputs(now)
   }
 
-  function publishCorrectedHeading (source, rawHeadingRad) {
-    if (!activeRuntimeProfile && store) setActiveProfile(store.active())
-    if (!activeRuntimeProfile) {
-      runtime.status = 'noProfile'
-      return
-    }
+  function updateInput (inputPath, value, source, timestamp) {
+    const previous = inputs.get(inputPath) || null
+    inputs.set(inputPath, {
+      path: inputPath,
+      value,
+      source: source || null,
+      timestamp,
+      previous: previous && Number.isFinite(previous.value) ? {
+        value: previous.value,
+        timestamp: previous.timestamp
+      } : null
+    })
+    runtime.sources[inputPath] = source || null
+    runtime.lastInputAt = new Date(timestamp).toISOString()
+  }
 
-    const correctionRad = correctionForCompiledProfile(activeRuntimeProfile, rawHeadingRad)
-    if (!Number.isFinite(correctionRad)) {
-      runtime.status = 'outsideReliableRange'
-      return
-    }
-
-    const calibrated = wrap360Rad(rawHeadingRad + correctionRad)
-    runtime.status = 'publishing'
-    runtime.activeProfileId = activeRuntimeProfile.id
+  function publishCorrectedHeading (rawHeadingRad, source, timestamp) {
+    const correctionRad = correctionForHeadingRad(table, rawHeadingRad)
+    const correctedHeadingRad = wrap360Rad(rawHeadingRad + correctionRad)
+    runtime.status = runtime.learningEnabled ? 'learningAndPublishing' : 'publishing'
+    runtime.inputSource = source || null
+    runtime.lastRawHeading = rawHeadingRad
     runtime.lastCorrection = correctionRad
-    runtime.lastCalibratedHeading = calibrated
-    runtime.lastPublishedAt = new Date().toISOString()
+    runtime.lastPublishedHeading = correctedHeadingRad
+    runtime.lastPublishedAt = new Date(timestamp || Date.now()).toISOString()
 
     app.handleMessage(PLUGIN_ID, {
+      context: options.context || 'vessels.self',
       updates: [
         {
-          $source: options.publishing.source,
           values: [
-            { path: options.publishing.path, value: calibrated }
+            {
+              path: options.publishing.path || PUBLISH_PATH,
+              value: correctedHeadingRad
+            }
           ]
         }
       ]
@@ -210,13 +158,100 @@ module.exports = function createPlugin (app) {
     setPluginStatus()
   }
 
+  function learnFromCurrentInputs (now) {
+    const validation = validateLearningInputs(now)
+    if (!validation.ok) {
+      recordRejected(validation.reason)
+      return
+    }
+
+    const headingDeg = radToDeg(wrap360Rad(validation.heading.value))
+    const headingTrueDeg = headingDeg + radToDeg(validation.variation.value)
+    const cogDeg = radToDeg(validation.cog.value)
+    const errorDeg = wrap180Deg(headingTrueDeg - cogDeg)
+    const correctionDeg = wrap180Deg(-errorDeg)
+
+    table = updateTableWithObservation(table, {
+      headingDeg,
+      correctionDeg,
+      time: new Date(now).toISOString()
+    }, options.table)
+    runtime.acceptedSamples += 1
+    runtime.lastObservation = {
+      at: new Date(now).toISOString(),
+      headingDeg: round(headingDeg),
+      cogDeg: round(cogDeg),
+      sog: validation.sog.value,
+      variationDeg: round(radToDeg(validation.variation.value)),
+      correctionDeg: round(correctionDeg)
+    }
+    runtime.lastRejectReason = null
+    maybeSaveTable(now)
+    setPluginStatus()
+  }
+
+  function validateLearningInputs (now) {
+    const startupAgeSeconds = (now - startedAt) / 1000
+    if (startupAgeSeconds < options.filters.startupDelaySeconds) {
+      return { ok: false, reason: 'startup stabilization' }
+    }
+
+    const heading = inputs.get(INPUT_PATHS.heading)
+    const cog = inputs.get(INPUT_PATHS.cog)
+    const sog = inputs.get(INPUT_PATHS.sog)
+    const variation = inputs.get(INPUT_PATHS.variation)
+    const missing = []
+    if (!heading) missing.push('heading')
+    if (!cog) missing.push('COG')
+    if (!sog) missing.push('SOG')
+    if (!variation) missing.push('variation')
+    if (missing.length) return { ok: false, reason: `missing ${missing.join(', ')}` }
+
+    const stale = [heading, cog, sog, variation].filter(input => (now - input.timestamp) / 1000 > options.filters.maxSampleAgeSeconds)
+    if (stale.length) return { ok: false, reason: `stale ${stale.map(input => input.path).join(', ')}` }
+
+    const sampleSkewSeconds = inputTimestampSkewSeconds([heading, cog, sog, variation])
+    if (sampleSkewSeconds > options.filters.maxSampleSkewSeconds) {
+      return { ok: false, reason: 'input timestamps are not aligned' }
+    }
+
+    if (sog.value < options.filters.minSog) return { ok: false, reason: 'SOG below learning threshold' }
+
+    const cogRate = angleRateDegPerSecond(cog)
+    if (Number.isFinite(cogRate) && cogRate > options.filters.maxCogRate) {
+      return { ok: false, reason: 'COG is not stable' }
+    }
+
+    const headingRate = angleRateDegPerSecond(heading)
+    if (Number.isFinite(headingRate) && headingRate > options.filters.maxHeadingRate) {
+      return { ok: false, reason: 'heading is not stable' }
+    }
+
+    return { ok: true, heading, cog, sog, variation }
+  }
+
+  function recordRejected (reason) {
+    runtime.rejectedSamples += 1
+    runtime.lastRejectReason = reason
+    runtime.status = runtime.lastPublishedAt ? 'publishing' : 'waitingForInput'
+    setPluginStatus()
+  }
+
+  function maybeSaveTable (now) {
+    const intervalMs = Math.max(1, Number(options.learning.saveIntervalSeconds || 60)) * 1000
+    if (now - lastSaveAt < intervalMs) return
+    store.setTable(table)
+    lastSaveAt = now
+  }
+
   function checkStaleInput () {
-    if (!runtime.lastInputAt) {
-      runtime.status = activeProfile ? 'missingInput' : 'noProfile'
+    if (runtime.status === 'error') return
+    if (!runtime.lastPublishedAt) {
+      runtime.status = 'waitingForInput'
       setPluginStatus()
       return
     }
-    const ageSeconds = (Date.now() - new Date(runtime.lastInputAt).getTime()) / 1000
+    const ageSeconds = (Date.now() - new Date(runtime.lastPublishedAt).getTime()) / 1000
     if (ageSeconds > options.publishing.staleAfterSeconds) {
       runtime.status = 'staleInput'
       setPluginStatus()
@@ -227,554 +262,195 @@ module.exports = function createPlugin (app) {
     router.get('/', (req, res) => sendPublicFile(res, 'index.html', 'text/html; charset=utf-8'))
     router.get('/app.js', (req, res) => sendPublicFile(res, 'app.js', 'application/javascript; charset=utf-8'))
     router.get('/styles.css', (req, res) => sendPublicFile(res, 'styles.css', 'text/css; charset=utf-8'))
+    router.get('/icon.svg', (req, res) => sendPublicFile(res, 'icon.svg', 'image/svg+xml'))
+    router.get('/public/icon.svg', (req, res) => sendPublicFile(res, 'icon.svg', 'image/svg+xml'))
 
-    router.get('/api/sources', asyncRoute(async () => ({
-      live: Array.from(liveSources.values()),
-      selected: options.sources,
+    router.get('/api/state', asyncRoute(async () => publicState()))
+    router.post('/api/learning', asyncRoute(async req => {
+      const body = await readBody(req)
+      runtime.learningEnabled = store.setLearningEnabled(Boolean(body.enabled))
+      setPluginStatus()
+      return publicState()
+    }))
+    router.get('/api/table', asyncRoute(async () => tableResponse()))
+    router.get('/api/table/export', asyncRoute(async () => tableResponse()))
+    router.post('/api/table/import', asyncRoute(async req => {
+      const body = await readBody(req)
+      table = store.setTable(body.table || body)
+      return tableResponse()
+    }))
+    router.post('/api/table/reset', asyncRoute(async () => {
+      table = store.resetTable()
+      return tableResponse()
+    }))
+    router.post('/api/table/sector/manual', asyncRoute(async req => {
+      const body = await readBody(req)
+      table = setManualCorrection(table, body.headingDeg, body.correctionDeg, options.table)
+      if (body.locked === false) table = setSectorLocked(table, body.headingDeg, false, options.table)
+      store.setTable(table)
+      return tableResponse()
+    }))
+    router.post('/api/table/sector/reset', asyncRoute(async req => {
+      const body = await readBody(req)
+      table = resetSector(table, body.headingDeg, options.table)
+      store.setTable(table)
+      return tableResponse()
+    }))
+    router.post('/api/table/sector/lock', asyncRoute(async req => {
+      const body = await readBody(req)
+      table = setSectorLocked(table, body.headingDeg, body.locked !== false, options.table)
+      store.setTable(table)
+      return tableResponse()
+    }))
+  }
+
+  function publicState () {
+    return {
+      id: PLUGIN_ID,
       context: options.context,
-      prometheus: {
-        baseUrl: options.prometheus.baseUrl,
-        type: options.prometheus.type,
-        auth: {
-          type: options.prometheus.auth && options.prometheus.auth.type || 'basic',
-          username: options.prometheus.auth && options.prometheus.auth.username || ''
-        }
-      },
-      metrics: options.metrics
-    })))
-
-    router.post('/api/discover', asyncRoute(async req => {
-      const body = await readBody(req)
-      const provider = makeProvider(body)
-      const range = body.range || { from: body.from, to: body.to }
-      const paths = body.paths || [
-        'navigation.headingMagnetic',
-        'navigation.courseOverGroundTrue',
-        'navigation.speedOverGround',
-        'navigation.magneticVariation'
-      ]
-      const resolutionSeconds = body.resolutionSeconds || DISCOVERY_RESOLUTION_SECONDS
-      const discovery = await discoverHistoricalContexts(provider, paths, range, resolutionSeconds)
-      const recommendations = discovery.contextSummary.selectedContext
-        ? await buildRecommendations(provider.withContext(discovery.contextSummary.selectedContext), discovery.paths, range).catch(error => ({ error: error.message }))
-        : { error: 'No common context found across required paths' }
-      return {
-        selectedContext: discovery.contextSummary.selectedContext,
-        contextSummary: discovery.contextSummary,
-        paths: discovery.paths,
-        recommendations
-      }
-    }))
-
-    router.post('/api/calibrate', asyncRoute(async req => {
-      const body = await readBody(req)
-      const provider = makeProvider(body)
-      const range = body.range || { from: body.from, to: body.to }
-      const sources = { ...options.sources, ...(body.sources || {}) }
-      assertSources(sources)
-      const filters = { ...options.filters, ...(body.filters || {}) }
-      const { series, segments } = await fetchCalibrationSeries(provider, sources, range, filters)
-      filters.segments = calibrationSegmentsFromNavigationSegments(segments)
-        .filter(segment => segment.quality !== 'rejected')
-        .map(segment => ({
-          from: segment.from,
-          to: segment.to,
-          minSog: segment.minSog,
-          maxCogRate: segment.maxCogRate,
-          quality: segment.quality,
-          reason: segment.reason || null
-        }))
-      const profile = calibrate(series, {
-        id: body.id,
-        range,
-        sources,
-        filters,
-        calibration: { ...options.calibration, ...(body.calibration || {}) }
-      })
-      profile.segments = segments
-      return profile
-    }))
-
-    router.get('/api/profiles', asyncRoute(async () => ({
-      activeProfileId: store.active() ? store.active().id : null,
-      activeInputSource: store.activeInputSource(),
-      profiles: store.list().map(profileSummary)
-    })))
-
-    router.post('/api/profiles', asyncRoute(async req => {
-      const body = await readBody(req)
-      const profile = body.profile || body
-      if (!compileCalibrationProfile(profile)) throw httpError(400, 'Profile has no usable runtime correction table')
-      return store.saveProfile(profile)
-    }))
-
-    router.get('/api/profiles/:id', asyncRoute(async req => {
-      const profile = store.get(req.params.id)
-      if (!profile) throw httpError(404, 'Profile not found')
-      return profile
-    }))
-
-    router.post('/api/profiles/:id/activate', asyncRoute(async req => {
-      const candidate = store.get(req.params.id)
-      if (!candidate) throw httpError(404, 'Profile not found')
-      if (!compileCalibrationProfile(candidate)) throw httpError(400, 'Profile has no usable runtime correction table')
-      const profile = store.activate(req.params.id)
-      setActiveProfile(profile)
-      runtime.status = statusFromState()
-      setPluginStatus()
-      return profile
-    }))
-
-    router.post('/api/profiles/:id/archive', asyncRoute(async req => {
-      const profile = store.archive(req.params.id)
-      if (!profile) throw httpError(404, 'Profile not found')
-      if (activeProfile && activeProfile.id === req.params.id) setActiveProfile(null)
-      runtime.status = statusFromState()
-      setPluginStatus()
-      return profile
-    }))
-
-    router.post('/api/profiles/:id/reject', asyncRoute(async req => {
-      const profile = store.reject(req.params.id)
-      if (!profile) throw httpError(404, 'Profile not found')
-      if (activeProfile && activeProfile.id === req.params.id) setActiveProfile(null)
-      runtime.status = statusFromState()
-      setPluginStatus()
-      return profile
-    }))
-
-    router.delete('/api/profiles/:id', asyncRoute(async req => {
-      const deleted = store.delete(req.params.id)
-      if (!deleted) throw httpError(404, 'Profile not found')
-      if (activeProfile && activeProfile.id === req.params.id) setActiveProfile(null)
-      runtime.status = statusFromState()
-      setPluginStatus()
-      return { deleted: true }
-    }))
-
-    router.get('/api/runtime', asyncRoute(async () => ({
-      ...runtime,
-      activeProfile: activeProfile ? profileSummary(activeProfile) : null,
-      activeInputSource: getRuntimeInputSource(),
-      profiles: store.list().map(profileSummary),
-      liveSources: Array.from(liveSources.values()),
-      lastRawHeadingDeg: runtime.lastRawHeading === null ? null : radToDeg(runtime.lastRawHeading),
-      lastCorrectionDeg: runtime.lastCorrection === null ? null : radToDeg(runtime.lastCorrection),
-      lastCalibratedHeadingDeg: runtime.lastCalibratedHeading === null ? null : radToDeg(runtime.lastCalibratedHeading)
-    })))
-
-    router.post('/api/runtime/config', asyncRoute(async req => {
-      const body = await readBody(req)
-      const profileId = body.profileId || null
-      const inputSource = body.inputSource || null
-      if (!profileId) throw httpError(400, 'Missing calibration table')
-      if (!inputSource) throw httpError(400, 'Missing Signal K input source')
-      const profile = store.get(profileId)
-      if (!profile) throw httpError(404, 'Profile not found')
-      if (!compileCalibrationProfile(profile)) throw httpError(400, 'Profile has no usable runtime correction table')
-      store.configureRuntime(profileId, inputSource)
-      setActiveProfile(profile)
-      runtime.status = statusFromState()
-      setPluginStatus()
-      return {
-        ...runtime,
-        activeProfile: profileSummary(profile),
-        activeInputSource: getRuntimeInputSource()
-      }
-    }))
-
-    router.post('/api/runtime/disable', asyncRoute(async () => {
-      store.configureRuntime(null, null)
-      setActiveProfile(null)
-      runtime.status = statusFromState()
-      setPluginStatus()
-      return {
-        ...runtime,
-        activeProfile: null,
-        activeInputSource: null
-      }
-    }))
-  }
-
-  function makeProvider (body = {}) {
-    return new PrometheusHistoryProvider({
-      baseUrl: body.baseUrl || body.prometheus && body.prometheus.baseUrl || options.prometheus.baseUrl,
-      context: body.context || options.context,
-      metrics: { ...options.metrics, ...(body.metrics || {}) },
-      auth: body.auth || body.prometheus && body.prometheus.auth || options.prometheus.auth
-    })
-  }
-
-  async function fetchCalibrationSeries (provider, sources, range, filters = {}) {
-    const coarseSegments = await findUsefulSegments(provider, sources, range, filters)
-    const segments = []
-    const heading = []
-    const cog = []
-    const sog = []
-    const variation = []
-
-    for (const segment of coarseSegments) {
-      if (segment.quality === 'rejected') {
-        segments.push(segment)
-        continue
-      }
-      const [segmentHeading, segmentCog, segmentSog, segmentVariation] = await Promise.all([
-        provider.getSeriesChunked('navigation.headingMagnetic', sources.heading, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
-        provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
-        provider.getSeriesChunked('navigation.speedOverGround', sources.sog, segment, FINE_CALIBRATION_RESOLUTION_SECONDS),
-        provider.getSeriesChunked('navigation.magneticVariation', sources.variation, segment, FINE_CALIBRATION_RESOLUTION_SECONDS)
-      ])
-      const navigationSegment = analyzeSegmentSamples(segment, segmentSog, segmentCog, filters, FINE_CALIBRATION_RESOLUTION_SECONDS, 'fine')
-      navigationSegment.stableSegments = buildStableCogSegments(navigationSegment, segmentSog, segmentCog, segmentHeading, filters)
-      navigationSegment.headingBins = mergeHeadingBins(navigationSegment.stableSegments.map(stable => stable.headingBins))
-      navigationSegment.quality = navigationSegment.stableSegments.length > 0
-        ? navigationSegment.quality
-        : 'rejected'
-      navigationSegment.reason = navigationSegment.stableSegments.length > 0
-        ? navigationSegment.reason
-        : 'no stable COG sub-segment found'
-      navigationSegment.stats.stableSegmentCount = navigationSegment.stableSegments.length
-      navigationSegment.stats.acceptedSamples = navigationSegment.stableSegments.reduce((sum, stable) => sum + Number(stable.stats && stable.stats.samples && stable.stats.samples.heading || 0), 0)
-      segments.push(navigationSegment)
-      for (const stableSegment of navigationSegment.stableSegments) {
-        heading.push(...samplesInRange(segmentHeading, stableSegment))
-        cog.push(...samplesInRange(segmentCog, stableSegment))
-        sog.push(...samplesInRange(segmentSog, stableSegment))
-        variation.push(...samplesInRange(segmentVariation, stableSegment))
-      }
+      paths: INPUT_PATHS,
+      filters: options.filters,
+      learningEnabled: runtime.learningEnabled,
+      runtime: runtimeSummary(),
+      table: tableResponse()
     }
+  }
 
+  function tableResponse () {
+    const normalized = normalizeTable(table, options.table)
     return {
-      series: {
-        heading: dedupeSamples(heading),
-        cog: dedupeSamples(cog),
-        sog: dedupeSamples(sog),
-        variation: dedupeSamples(variation)
-      },
-      segments
+      summary: summarizeTable(normalized),
+      harmonics: normalized.harmonics,
+      bins: normalized.bins
     }
   }
 
-  async function findUsefulSegments (provider, sources, range, filters = {}) {
-    const from = new Date(range.from).getTime()
-    const to = new Date(range.to).getTime()
-    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) throw httpError(400, 'Invalid calibration range')
-
-    const durationSeconds = Math.max((to - from) / 1000, 1)
-    const coarseResolution = Math.max(DISCOVERY_RESOLUTION_SECONDS, Math.min(MAX_COARSE_SCAN_RESOLUTION_SECONDS, Math.ceil(durationSeconds / 3000)))
-    const minSog = Number(filters.minSog || DEFAULT_OPTIONS.filters.minSog)
-    const movementDetectionSog = Math.max(0.3, Math.min(minSog, 0.8))
-    const minSegmentDuration = Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration)
-    const coarseSog = await provider.getSeriesChunked('navigation.speedOverGround', sources.sog, range, coarseResolution, 10000)
-    if (coarseSog.length === 0) return [analyzeSegmentSamples(range, [], [], filters, coarseResolution, 'coarse')]
-
-    const paddingMs = coarseResolution * 2000
-    const segments = []
-    let start = null
-    let last = null
-    for (const sample of coarseSog) {
-      if (sample.value >= movementDetectionSog) {
-        if (start === null) start = sample.t
-        last = sample.t
-      } else if (start !== null) {
-        addSegment(segments, start, last, from, to, paddingMs, minSegmentDuration)
-        start = null
-        last = null
-      }
-    }
-    if (start !== null) addSegment(segments, start, last, from, to, paddingMs, minSegmentDuration)
-    if (segments.length === 0) {
-      return [{
-        from: new Date(from).toISOString(),
-        to: new Date(to).toISOString(),
-        quality: 'rejected',
-        reason: 'no SOG movement found',
-        stats: {
-          durationSeconds: Math.round(durationSeconds),
-          analysisPass: 'coarse',
-          analysisResolutionSeconds: coarseResolution,
-          samples: {
-            sog: coarseSog.length,
-            cog: 0
-          }
-        }
-      }]
-    }
-
-    const merged = mergeSegments(segments, coarseResolution * 2000)
-    const refined = []
-    for (const segment of merged) {
-      refined.push(await refineSegmentBoundaries(provider, sources, segment, range, movementDetectionSog, minSegmentDuration))
-    }
-    return refined
-  }
-
-  async function refineSegmentBoundaries (provider, sources, segment, fullRange, movementDetectionSog, minSegmentDuration) {
-    const samples = await provider.getSeriesChunked(
-      'navigation.speedOverGround',
-      sources.sog,
-      segment,
-      FINE_CALIBRATION_RESOLUTION_SECONDS,
-      10000
-    ).catch(() => [])
-    const moving = samples.filter(sample => Number.isFinite(sample.value) && sample.value >= movementDetectionSog)
-    if (moving.length === 0) {
-      return {
-        ...segment,
-        coarseFrom: segment.from,
-        coarseTo: segment.to,
-        quality: 'rejected',
-        reason: 'no fine SOG movement found',
-        stats: { samples: { sog: samples.length, cog: 0 } }
-      }
-    }
-
-    const rangeFrom = new Date(fullRange.from).getTime()
-    const rangeTo = new Date(fullRange.to).getTime()
-    const movementFrom = moving[0].t
-    const movementTo = moving[moving.length - 1].t
-    const paddingMs = SEGMENT_BOUNDARY_PADDING_SECONDS * 1000
-    const refinedFrom = Math.max(rangeFrom, movementFrom - paddingMs)
-    const refinedTo = Math.min(rangeTo, movementTo + paddingMs)
-    const durationSeconds = (refinedTo - refinedFrom) / 1000
-
+  function runtimeSummary () {
     return {
-      ...segment,
-      coarseFrom: segment.from,
-      coarseTo: segment.to,
-      movementFrom: new Date(movementFrom).toISOString(),
-      movementTo: new Date(movementTo).toISOString(),
-      from: new Date(refinedFrom).toISOString(),
-      to: new Date(refinedTo).toISOString(),
-      boundaryResolutionSeconds: FINE_CALIBRATION_RESOLUTION_SECONDS,
-      boundaryPaddingSeconds: SEGMENT_BOUNDARY_PADDING_SECONDS,
-      quality: durationSeconds < minSegmentDuration ? 'rejected' : 'candidate',
-      reason: durationSeconds < minSegmentDuration ? 'too short after boundary refinement' : null,
-      stats: {
-        durationSeconds: Math.round(durationSeconds),
-        samples: {
-          sog: samples.length,
-          cog: 0
-        }
-      }
+      status: runtime.status,
+      inputSource: runtime.inputSource,
+      sources: runtime.sources,
+      acceptedSamples: runtime.acceptedSamples,
+      rejectedSamples: runtime.rejectedSamples,
+      lastRejectReason: runtime.lastRejectReason,
+      lastObservation: runtime.lastObservation,
+      lastInputAt: runtime.lastInputAt,
+      lastPublishedAt: runtime.lastPublishedAt,
+      lastRawHeadingDeg: runtime.lastRawHeading === null ? null : round(radToDeg(runtime.lastRawHeading)),
+      lastCorrectionDeg: runtime.lastCorrection === null ? null : round(radToDeg(runtime.lastCorrection)),
+      lastPublishedHeadingDeg: runtime.lastPublishedHeading === null ? null : round(radToDeg(runtime.lastPublishedHeading))
     }
-  }
-
-  function analyzeSegmentSamples (segment, sog, cog, filters = {}, resolutionSeconds = 1, pass = 'fine') {
-    const speeds = sog.map(sample => sample.value).filter(value => Number.isFinite(value)).sort((a, b) => a - b)
-    const cogRates = cogRatesDegPerSecond(cog).sort((a, b) => a - b)
-    const minSog = round1(clamp(percentile(speeds.filter(value => value > 0.2), pass === 'fine' ? 0.20 : 0.25) || filters.minSog || DEFAULT_OPTIONS.filters.minSog, 0.8, 3))
-    const localCogRate = round1(clamp(percentile(cogRates, pass === 'fine' ? 0.90 : 0.75) || filters.maxCogRate || DEFAULT_OPTIONS.filters.maxCogRate, 0.5, 6))
-    const medianCogRate = percentile(cogRates, 0.50) || 0
-    const p90CogRate = percentile(cogRates, 0.90) || 0
-    const durationSeconds = (new Date(segment.to).getTime() - new Date(segment.from).getTime()) / 1000
-    const quality = durationSeconds < Number(filters.minSegmentDuration || DEFAULT_OPTIONS.filters.minSegmentDuration) || speeds.length < 3 || cog.length < 3
-      ? 'rejected'
-      : p90CogRate > 4
-        ? 'weak'
-        : 'good'
-
-    return {
-      ...segment,
-      minSog,
-      maxCogRate: localCogRate,
-      quality,
-      reason: quality === 'rejected'
-        ? 'too short or sparse'
-        : p90CogRate > localCogRate
-          ? 'high course variation; filtering at local threshold'
-          : null,
-      stats: {
-        durationSeconds: Math.round(durationSeconds),
-        analysisPass: pass,
-        analysisResolutionSeconds: Number(resolutionSeconds),
-        sogMedian: round1(percentile(speeds, 0.50) || 0),
-        cogRateMedian: round1(medianCogRate),
-        cogRateP90: round1(p90CogRate),
-        samples: {
-          sog: sog.length,
-          cog: cog.length
-        }
-      }
-    }
-  }
-
-  function buildStableCogSegments (navigationSegment, sog, cog, heading, filters = {}) {
-    const minSog = Number(navigationSegment.minSog || filters.minSog || DEFAULT_OPTIONS.filters.minSog)
-    const threshold = stableCogRateThreshold(cog)
-    const sogByTime = new Map(sog.map(sample => [sample.t, sample.value]))
-    const states = []
-    const rateWindow = []
-    let windowSum = 0
-
-    const sortedCog = dedupeSamples(cog).sort((a, b) => a.t - b.t)
-    for (let index = 1; index < sortedCog.length; index += 1) {
-      const previous = sortedCog[index - 1]
-      const current = sortedCog[index]
-      const dt = (current.t - previous.t) / 1000
-      if (dt <= 0) continue
-      const rate = Math.abs(wrap180Deg(radToDeg(current.value - previous.value))) / dt
-      if (!Number.isFinite(rate)) continue
-      rateWindow.push({ t: current.t, rate })
-      windowSum += rate
-      while (rateWindow.length && current.t - rateWindow[0].t > STABLE_COG_WINDOW_SECONDS * 1000) {
-        windowSum -= rateWindow.shift().rate
-      }
-      const smoothedRate = rateWindow.length ? windowSum / rateWindow.length : rate
-      const speed = sogByTime.get(current.t)
-      states.push({
-        from: previous.t,
-        to: current.t,
-        stable: Number.isFinite(speed) && speed >= minSog && smoothedRate <= threshold,
-        smoothedRate
-      })
-    }
-
-    const rawSegments = segmentsFromStates(states, STABLE_COG_MIN_DURATION_SECONDS)
-    const merged = mergeSegments(
-      rawSegments.map(segment => ({
-        from: new Date(segment.from).toISOString(),
-        to: new Date(segment.to).toISOString()
-      })),
-      STABLE_COG_MERGE_GAP_SECONDS * 1000
-    )
-
-    return merged.map((segment, index) => {
-      const stableSog = samplesInRange(sog, segment)
-      const stableCog = samplesInRange(cog, segment)
-      const stableHeading = samplesInRange(heading, segment)
-      const analyzed = analyzeSegmentSamples(segment, stableSog, stableCog, {
-        ...filters,
-        minSog,
-        maxCogRate: threshold
-      }, FINE_CALIBRATION_RESOLUTION_SECONDS, 'stable')
-      const maxCogRate = round1(clamp(threshold * 1.2, 0.5, 2.5))
-      return {
-        ...analyzed,
-        id: `${navigationSegment.from}-${index + 1}`,
-        parentFrom: navigationSegment.from,
-        parentTo: navigationSegment.to,
-        maxCogRate,
-        stableCogThreshold: round1(threshold),
-        stableWindowSeconds: STABLE_COG_WINDOW_SECONDS,
-        headingBins: headingBinCounts(stableHeading, HEADING_COVERAGE_BIN_DEG),
-        stats: {
-          ...analyzed.stats,
-          samples: {
-            ...analyzed.stats.samples,
-            heading: stableHeading.length
-          }
-        }
-      }
-    }).filter(segment => segment.quality !== 'rejected')
-  }
-
-  function assertSources (sources) {
-    for (const key of ['heading', 'cog', 'sog', 'variation']) {
-      if (!sources[key]) throw httpError(400, `Missing ${key} source`)
-    }
-  }
-
-  function getRuntimeInputSource () {
-    return store && store.activeInputSource() || null
-  }
-
-  function setActiveProfile (profile) {
-    activeProfile = profile || null
-    activeRuntimeProfile = activeProfile ? compileCalibrationProfile(activeProfile) : null
-    runtime.activeProfileId = activeRuntimeProfile ? activeRuntimeProfile.id : null
-    runtime.inputSource = getRuntimeInputSource()
-  }
-
-  function recordLiveSource (source, values) {
-    const current = liveSources.get(source) || {
-      source,
-      paths: {},
-      firstSeen: new Date().toISOString()
-    }
-    current.lastSeen = new Date().toISOString()
-    for (const value of values) {
-      current.paths[value.path] = {
-        latestValue: value.value,
-        lastSeen: current.lastSeen
-      }
-    }
-    liveSources.set(source, current)
-  }
-
-  function statusFromState () {
-    if (!options.enabled || !options.publishing.enabled) return 'inactive'
-    if (!activeRuntimeProfile) return 'noProfile'
-    if (!getRuntimeInputSource()) return 'missingInput'
-    return 'active'
   }
 
   function setPluginStatus () {
-    if (typeof app.setPluginStatus === 'function') {
-      const statusText = `Compass calibrator: ${runtime.status}`
-      if (statusText !== lastPluginStatus) {
-        app.setPluginStatus(statusText)
-        lastPluginStatus = statusText
-      }
-    }
+    if (!app.setPluginStatus) return
+    const summary = summarizeTable(table)
+    const learning = runtime.learningEnabled ? `learning ${runtime.acceptedSamples}/${runtime.rejectedSamples}` : 'learning off'
+    const correction = runtime.lastCorrection === null ? 'no heading' : `${round(radToDeg(runtime.lastCorrection))} deg`
+    app.setPluginStatus(`${runtime.status}; ${learning}; correction ${correction}; ${summary.usableBinCount}/${summary.binCount} sectors`)
   }
+}
+
+function createRuntimeState () {
+  return {
+    status: 'stopped',
+    learningEnabled: false,
+    inputSource: null,
+    sources: {},
+    acceptedSamples: 0,
+    rejectedSamples: 0,
+    lastRejectReason: null,
+    lastObservation: null,
+    lastInputAt: null,
+    lastPublishedAt: null,
+    lastRawHeading: null,
+    lastCorrection: null,
+    lastPublishedHeading: null
+  }
+}
+
+function isInputPath (inputPath) {
+  return Object.values(INPUT_PATHS).includes(inputPath)
+}
+
+function sourceRef (update) {
+  return update.$source || update.source && update.source.label || null
+}
+
+function normalizeTimestamp (value) {
+  if (!value) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function angleRateDegPerSecond (input) {
+  if (!input || !input.previous) return null
+  const dt = (input.timestamp - input.previous.timestamp) / 1000
+  if (dt <= 0) return null
+  return Math.abs(wrap180Deg(radToDeg(input.value - input.previous.value))) / dt
+}
+
+function inputTimestampSkewSeconds (inputs) {
+  const timestamps = inputs
+    .map(input => input && input.timestamp)
+    .filter(timestamp => Number.isFinite(timestamp))
+  if (timestamps.length < 2) return 0
+  return (Math.max(...timestamps) - Math.min(...timestamps)) / 1000
+}
+
+function sendPublicFile (res, fileName, contentType) {
+  const filePath = path.join(__dirname, 'public', fileName)
+  fs.readFile(filePath, (error, contents) => {
+    if (error) {
+      res.statusCode = error.code === 'ENOENT' ? 404 : 500
+      res.end(error.code === 'ENOENT' ? 'Not found' : 'Could not read file')
+      return
+    }
+    res.setHeader('content-type', contentType)
+    res.end(contents)
+  })
 }
 
 function asyncRoute (handler) {
   return (req, res) => {
     Promise.resolve(handler(req, res))
-      .then(payload => sendJson(res, payload))
-      .catch(error => sendJson(res, { error: error.message || String(error) }, error.statusCode || 500))
+      .then(result => {
+        if (res.headersSent) return
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify(result))
+      })
+      .catch(error => {
+        const status = error.statusCode || 500
+        res.statusCode = status
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ error: error.message || String(error) }))
+      })
   }
 }
 
-function sendJson (res, payload, statusCode = 200) {
-  res.statusCode = statusCode
-  if (typeof res.setHeader === 'function') res.setHeader('content-type', 'application/json; charset=utf-8')
-  res.end(JSON.stringify(payload))
-}
-
 function readBody (req) {
-  if (req.body !== undefined) return Promise.resolve(req.body || {})
+  if (req.body && typeof req.body === 'object') return Promise.resolve(req.body)
   return new Promise((resolve, reject) => {
-    let body = ''
-    req.on('data', chunk => {
-      body += chunk
-    })
+    let raw = ''
+    req.on('data', chunk => { raw += chunk })
+    req.on('error', reject)
     req.on('end', () => {
-      if (!body) return resolve({})
+      if (!raw) return resolve({})
       try {
-        resolve(JSON.parse(body))
+        resolve(JSON.parse(raw))
       } catch (error) {
-        reject(httpError(400, 'Invalid JSON body'))
+        error.statusCode = 400
+        reject(error)
       }
     })
-    req.on('error', reject)
   })
 }
 
-function sendPublicFile (res, filename, contentType) {
-  const filePath = path.join(__dirname, 'public', filename)
-  res.statusCode = 200
-  if (typeof res.setHeader === 'function') res.setHeader('content-type', contentType)
-  fs.createReadStream(filePath).on('error', () => {
-    res.statusCode = 404
-    res.end('Not found')
-  }).pipe(res)
-}
-
-function httpError (statusCode, message) {
-  const error = new Error(message)
-  error.statusCode = statusCode
-  return error
-}
-
-function mergeOptions (base, override) {
-  if (!override || typeof override !== 'object') return structuredCloneSafe(base)
-  const result = Array.isArray(base) ? [...base] : { ...base }
-  for (const [key, value] of Object.entries(override)) {
-    if (value && typeof value === 'object' && !Array.isArray(value) && base[key] && typeof base[key] === 'object') {
-      result[key] = mergeOptions(base[key], value)
+function mergeOptions (defaults, overrides) {
+  const result = { ...defaults }
+  for (const [key, value] of Object.entries(overrides || {})) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && defaults[key] && typeof defaults[key] === 'object') {
+      result[key] = mergeOptions(defaults[key], value)
     } else {
       result[key] = value
     }
@@ -782,330 +458,8 @@ function mergeOptions (base, override) {
   return result
 }
 
-function structuredCloneSafe (value) {
-  return JSON.parse(JSON.stringify(value))
-}
-
-async function discoverHistoricalContexts (provider, paths, range, resolutionSeconds) {
-  const rows = []
-  const errors = []
-  const pathContexts = new Map(paths.map(path => [path, new Set()]))
-  const expected = expectedSampleCount(range, resolutionSeconds)
-
-  for (const path of paths) {
-    const metric = provider.metricForPath(path)
-    let result
-    try {
-      result = await provider.queryRange(metric, range, resolutionSeconds)
-    } catch (error) {
-      errors.push({ path, metric, error: error.message })
-      continue
-    }
-
-    for (const series of result) {
-      const labels = series.metric || {}
-      const context = labels.context || ''
-      if (!context) continue
-      const samples = normalizePrometheusValues(series.values)
-      if (!samples.length) continue
-      pathContexts.get(path).add(context)
-      const latest = samples[samples.length - 1]
-      rows.push({
-        path,
-        metric,
-        context,
-        source: labels.source || '',
-        sampleCount: samples.length,
-        coveragePercent: expected ? Math.min(100, Math.round(samples.length / expected * 1000) / 10) : 0,
-        firstSample: new Date(samples[0].t).toISOString(),
-        lastSample: new Date(latest.t).toISOString(),
-        latestValue: latest.value
-      })
-    }
-  }
-
-  const allContexts = unique(rows.map(row => row.context).filter(Boolean))
-  const commonContexts = allContexts.filter(context => paths.every(path => pathContexts.get(path).has(context)))
-  const selectedContext = commonContexts[0] || allContexts[0] || null
-  const status = commonContexts.length === 1
-    ? 'ok'
-    : commonContexts.length === 0
-      ? 'error'
-      : 'warning'
-  const details = allContexts.map(context => ({
-    context,
-    paths: paths.map(path => ({
-      path,
-      sources: sortCoverageRows(rows.filter(row => row.context === context && row.path === path))
-    }))
-  }))
-
-  return {
-    contextSummary: {
-      status,
-      contexts: commonContexts,
-      allContexts,
-      selectedContext,
-      errors,
-      details
-    },
-    paths: rowsByPathForContext(rows, paths, selectedContext)
-  }
-}
-
-function rowsByPathForContext (rows, paths, context) {
-  const result = {}
-  for (const path of paths) {
-    result[path] = context ? sortCoverageRows(rows.filter(row => row.context === context && row.path === path)) : []
-  }
-  return result
-}
-
-function sortCoverageRows (rows) {
-  return [...rows].sort((a, b) => {
-    const scoreA = Number(a.coveragePercent || 0) * 1000000 + Number(a.sampleCount || 0)
-    const scoreB = Number(b.coveragePercent || 0) * 1000000 + Number(b.sampleCount || 0)
-    return scoreB - scoreA
-  })
-}
-
-function normalizePrometheusValues (values) {
-  return (values || [])
-    .map(([timestamp, value]) => ({
-      t: Number(timestamp) * 1000,
-      value: Number(value)
-    }))
-    .filter(sample => Number.isFinite(sample.t) && Number.isFinite(sample.value))
-    .sort((a, b) => a.t - b.t)
-}
-
-function expectedSampleCount (range, resolutionSeconds) {
-  const from = new Date(range.from).getTime()
-  const to = new Date(range.to).getTime()
-  const resolution = Number(resolutionSeconds || 1)
-  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from || !Number.isFinite(resolution) || resolution <= 0) return 0
-  return Math.max(Math.floor((to - from) / 1000 / resolution) + 1, 1)
-}
-
-function unique (values) {
-  return Array.from(new Set(values))
-}
-
-function addSegment (segments, start, end, rangeFrom, rangeTo, paddingMs, minDurationSeconds) {
-  if (end - start < minDurationSeconds * 1000) return
-  segments.push({
-    from: new Date(Math.max(rangeFrom, start - paddingMs)).toISOString(),
-    to: new Date(Math.min(rangeTo, end + paddingMs)).toISOString()
-  })
-}
-
-function mergeSegments (segments, mergeGapMs) {
-  const sorted = segments
-    .map(segment => ({
-      from: new Date(segment.from).getTime(),
-      to: new Date(segment.to).getTime()
-    }))
-    .filter(segment => Number.isFinite(segment.from) && Number.isFinite(segment.to) && segment.to >= segment.from)
-    .sort((a, b) => a.from - b.from)
-
-  const merged = []
-  for (const segment of sorted) {
-    const previous = merged[merged.length - 1]
-    if (previous && segment.from - previous.to <= mergeGapMs) {
-      previous.to = Math.max(previous.to, segment.to)
-    } else {
-      merged.push({ ...segment })
-    }
-  }
-
-  return merged.map(segment => ({
-    from: new Date(segment.from).toISOString(),
-    to: new Date(segment.to).toISOString()
-  }))
-}
-
-function segmentsFromStates (states, minDurationSeconds) {
-  const segments = []
-  let start = null
-  let last = null
-  for (const state of states) {
-    if (state.stable) {
-      if (start === null) start = state.from
-      last = state.to
-    } else if (start !== null) {
-      if (last - start >= minDurationSeconds * 1000) segments.push({ from: start, to: last })
-      start = null
-      last = null
-    }
-  }
-  if (start !== null && last - start >= minDurationSeconds * 1000) segments.push({ from: start, to: last })
-  return segments
-}
-
-function dedupeSamples (samples) {
-  const byTime = new Map()
-  for (const sample of samples) byTime.set(sample.t, sample)
-  return Array.from(byTime.values()).sort((a, b) => a.t - b.t)
-}
-
-function cogRatesDegPerSecond (samples) {
-  const rates = []
-  const sorted = dedupeSamples(samples).sort((a, b) => a.t - b.t)
-  for (let index = 1; index < sorted.length; index += 1) {
-    const dt = (sorted[index].t - sorted[index - 1].t) / 1000
-    if (dt <= 0) continue
-    const rate = Math.abs(wrap180Deg(radToDeg(sorted[index].value - sorted[index - 1].value))) / dt
-    if (Number.isFinite(rate) && rate > 0) rates.push(rate)
-  }
-  return rates
-}
-
-function stableCogRateThreshold (samples) {
-  const rates = cogRatesDegPerSecond(samples).sort((a, b) => a - b)
-  const median = percentile(rates, 0.50)
-  if (!Number.isFinite(median)) return 1.5
-  return clamp(median * 1.5, 0.5, 2)
-}
-
-function samplesInRange (samples, range) {
-  const from = new Date(range.from).getTime()
-  const to = new Date(range.to).getTime()
-  if (!Number.isFinite(from) || !Number.isFinite(to)) return []
-  return samples.filter(sample => sample.t >= from && sample.t <= to)
-}
-
-function headingBinCounts (headingSamples, binSizeDeg) {
-  const binCount = Math.ceil(360 / binSizeDeg)
-  const bins = Array.from({ length: binCount }, (_, index) => ({
-    fromDeg: index * binSizeDeg,
-    toDeg: Math.min((index + 1) * binSizeDeg, 360),
-    samples: 0
-  }))
-  for (const sample of headingSamples) {
-    if (!Number.isFinite(sample.value)) continue
-    const headingDeg = radToDeg(wrap360Rad(sample.value))
-    const index = Math.min(Math.floor(headingDeg / binSizeDeg), binCount - 1)
-    bins[index].samples += 1
-  }
-  return bins
-}
-
-function mergeHeadingBins (binsList) {
-  const merged = headingBinCounts([], HEADING_COVERAGE_BIN_DEG)
-  for (const bins of binsList) {
-    if (!Array.isArray(bins)) continue
-    for (let index = 0; index < Math.min(merged.length, bins.length); index += 1) {
-      merged[index].samples += Number(bins[index].samples || 0)
-    }
-  }
-  return merged
-}
-
-function calibrationSegmentsFromNavigationSegments (segments) {
-  const flat = []
-  for (const segment of segments || []) {
-    if (Array.isArray(segment.stableSegments) && segment.stableSegments.length > 0) {
-      flat.push(...segment.stableSegments)
-    } else {
-      flat.push(segment)
-    }
-  }
-  return flat
-}
-
-async function buildRecommendations (provider, discovered, range) {
-  const sources = {
-    heading: bestDiscoveredSource(discovered['navigation.headingMagnetic']),
-    cog: bestDiscoveredSource(discovered['navigation.courseOverGroundTrue']),
-    sog: bestDiscoveredSource(discovered['navigation.speedOverGround']),
-    variation: bestDiscoveredSource(discovered['navigation.magneticVariation'])
-  }
-  const filters = {
-    minSog: DEFAULT_OPTIONS.filters.minSog,
-    maxCogRate: DEFAULT_OPTIONS.filters.maxCogRate,
-    minSamplesPerBin: DEFAULT_OPTIONS.filters.minSamplesPerBin
-  }
-  const calibration = {
-    binSize: DEFAULT_OPTIONS.calibration.binSize
-  }
-
-  const from = new Date(range.from).getTime()
-  const to = new Date(range.to).getTime()
-  const durationSeconds = Math.max((to - from) / 1000, 1)
-  const coarseResolution = Math.max(30, Math.ceil(durationSeconds / 2500))
-  let movingSampleCount = 0
-
-  if (sources.sog) {
-    const sog = await provider.getSeriesChunked('navigation.speedOverGround', sources.sog, range, coarseResolution, 10000)
-    const speeds = sog.map(sample => sample.value).filter(value => Number.isFinite(value) && value > 0.2).sort((a, b) => a - b)
-    movingSampleCount = speeds.length
-    if (speeds.length > 0) {
-      filters.minSog = round1(clamp(percentile(speeds, 0.35), 0.8, 3))
-    }
-  }
-
-  if (sources.cog) {
-    const cog = await provider.getSeriesChunked('navigation.courseOverGroundTrue', sources.cog, range, coarseResolution, 10000)
-    const usefulRates = cogRatesDegPerSecond(cog).sort((a, b) => a - b)
-    if (usefulRates.length > 0) {
-      filters.maxCogRate = round1(clamp(percentile(usefulRates, 0.65), 0.5, 3))
-    }
-  }
-
-  const headingSamples = discovered['navigation.headingMagnetic'] || []
-  const totalHeadingSamples = headingSamples.reduce((sum, source) => sum + Number(source.sampleCount || 0), 0)
-  const estimatedSamples = Math.max(totalHeadingSamples, movingSampleCount)
-  if (estimatedSamples < 500) {
-    calibration.binSize = 30
-    filters.minSamplesPerBin = 5
-  } else if (estimatedSamples < 1500) {
-    calibration.binSize = 15
-    filters.minSamplesPerBin = 8
-  } else {
-    calibration.binSize = 10
-    filters.minSamplesPerBin = 10
-  }
-
-  return {
-    sources,
-    filters,
-    calibration
-  }
-}
-
-function bestDiscoveredSource (sources = []) {
-  const best = [...sources].sort((a, b) => {
-    const scoreA = Number(a.coveragePercent || 0) * 1000000 + Number(a.sampleCount || 0)
-    const scoreB = Number(b.coveragePercent || 0) * 1000000 + Number(b.sampleCount || 0)
-    return scoreB - scoreA
-  })[0]
-  return best ? best.source : ''
-}
-
-function percentile (sortedValues, fraction) {
-  if (!sortedValues.length) return null
-  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.floor((sortedValues.length - 1) * fraction)))
-  return sortedValues[index]
-}
-
-function clamp (value, min, max) {
-  return Math.min(max, Math.max(min, value))
-}
-
-function round1 (value) {
-  return Math.round(value * 10) / 10
-}
-
-function profileSummary (profile) {
-  return {
-    id: profile.id,
-    createdAt: profile.createdAt,
-    savedAt: profile.savedAt || null,
-    displayName: profile.displayName || profile.savedAt || profile.createdAt,
-    state: profile.state,
-    range: profile.range,
-    sources: profile.sources,
-    quality: profile.quality,
-    warnings: profile.warnings || []
-  }
+function round (value, digits = 3) {
+  if (!Number.isFinite(value)) return null
+  const factor = 10 ** digits
+  return Math.round(value * factor) / factor
 }

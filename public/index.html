@@ -12,165 +12,67 @@
       <header class="topbar">
         <div>
           <h1>Compass Calibrator</h1>
-          <p>Batch-calibrate a selected magnetic heading source from source-aware historical data.</p>
+          <p>Live heading correction learning for Signal K magnetic heading data.</p>
         </div>
+        <button id="refresh" class="secondary" type="button">Refresh</button>
       </header>
+
       <div id="message" class="message" hidden></div>
 
-      <nav class="tabs" aria-label="Main sections">
-        <button class="tabButton active" type="button" data-tab="calibrationTab">Calibrate</button>
-        <button class="tabButton" type="button" data-tab="calibrationsTab">Calibrations Store</button>
-        <button class="tabButton" type="button" data-tab="runtimeTab">Runtime</button>
-      </nav>
-
-      <section id="calibrationTab" class="tabPanel active">
-      <section class="panel">
-        <h2>Sources</h2>
-        <div class="grid">
-          <label>
-            History backend URL
-            <input id="baseUrl" value="http://victoriametrics:8428">
-          </label>
-          <label>
-            History username
-            <input id="historyUsername" autocomplete="username">
-          </label>
-          <label>
-            History password
-            <input id="historyPassword" type="password" autocomplete="current-password">
-          </label>
-          <label>
-            Discovery from
-            <input id="discoverFrom" type="datetime-local">
-          </label>
-          <label>
-            Discovery to
-            <input id="discoverTo" type="datetime-local">
+      <section class="panel statusPanel">
+        <div class="panelTitle">
+          <h2>Runtime</h2>
+          <label class="switch">
+            <input id="learningEnabled" type="checkbox">
+            <span>Learning</span>
           </label>
         </div>
-        <div class="actions">
-          <button id="discover" type="button">Discover historical sources</button>
-          <span id="discoverStatus" class="inlineStatus" hidden>Discovering historical sources...</span>
-        </div>
-        <details class="advanced">
-          <summary>Metric names</summary>
-          <div class="grid">
-            <label>
-              Heading magnetic metric
-              <input id="metricHeadingMagnetic" value="navigation_headingMagnetic">
-            </label>
-            <label>
-              COG true metric
-              <input id="metricCourseOverGroundTrue" value="navigation_courseOverGroundTrue">
-            </label>
-            <label>
-              SOG metric
-              <input id="metricSpeedOverGround" value="navigation_speedOverGround">
-            </label>
-            <label>
-              Magnetic variation metric
-              <input id="metricMagneticVariation" value="navigation_magneticVariation">
-            </label>
-          </div>
-        </details>
-        <div id="sources" class="tableWrap"></div>
+        <div id="runtime" class="runtimeGrid"></div>
       </section>
 
       <section class="panel">
-        <h2>Calibration</h2>
-        <div class="grid">
-          <label>
-            Context
-            <select id="context">
-              <option value="">Discover sources first</option>
-            </select>
-          </label>
-          <label>
-            Heading source
-            <select id="headingSource"></select>
-          </label>
-          <label>
-            COG source
-            <select id="cogSource"></select>
-          </label>
-          <label>
-            SOG source
-            <select id="sogSource"></select>
-          </label>
-          <label>
-            Variation source
-            <select id="variationSource"></select>
-          </label>
-          <label>
-            From
-            <input id="from" type="datetime-local">
-          </label>
-          <label>
-            To
-            <input id="to" type="datetime-local">
-          </label>
-        </div>
-        <input id="minSog" type="hidden" value="3">
-        <input id="maxCogRate" type="hidden" value="1">
-        <input id="binSize" type="hidden" value="10">
-        <input id="minSamplesPerBin" type="hidden" value="10">
-        <div class="actions">
-          <button id="calibrate" type="button">Run calibration</button>
-          <span id="calibrateStatus" class="inlineStatus" hidden>Calibration running...</span>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Candidate Review</h2>
-        <div id="candidate" class="summary muted">No candidate profile yet.</div>
-        <canvas id="plot" width="760" height="340"></canvas>
+        <h2>Correction Table</h2>
+        <div id="summary" class="summaryGrid"></div>
+        <canvas id="plot" width="940" height="340"></canvas>
         <div id="table" class="tableWrap"></div>
-        <div class="actions">
-          <button id="saveCandidate" type="button" disabled>Save table</button>
-          <button id="cancelCandidate" type="button" disabled>Cancel</button>
-        </div>
-      </section>
       </section>
 
-      <section id="calibrationsTab" class="tabPanel">
-        <section class="panel">
-          <h2>Saved Calibrations</h2>
-          <div id="profilesList" class="tableWrap muted">No saved calibration loaded.</div>
-        </section>
-        <section class="panel">
-          <h2>Calibration Details</h2>
-          <div id="savedProfile" class="summary muted">Select a calibration table.</div>
-          <canvas id="savedPlot" width="760" height="340"></canvas>
-          <div id="savedTable" class="tableWrap"></div>
-          <div class="actions">
-            <button id="deleteProfile" type="button" disabled>Delete table</button>
+      <dialog id="sectorDialog">
+        <form method="dialog" class="dialogBody">
+          <div class="panelTitle">
+            <h2 id="sectorDialogTitle">Edit Sector</h2>
+            <button id="closeSectorDialog" class="secondary tiny" value="cancel" type="submit">Close</button>
           </div>
-        </section>
-      </section>
+          <div class="grid sectorEditGrid">
+            <label>
+              Sector
+              <input id="sectorLabel" readonly>
+            </label>
+            <label>
+              Correction
+              <input id="manualCorrection" type="number" step="0.01">
+            </label>
+            <label class="checkboxLabel">
+              <input id="manualLocked" type="checkbox">
+              Locked
+            </label>
+          </div>
+          <p id="sectorHint" class="muted"></p>
+          <div class="actions">
+            <button id="saveSector" type="button">Save changes</button>
+            <button id="resetSector" class="danger" type="button">Delete correction</button>
+          </div>
+        </form>
+      </dialog>
 
-      <section id="runtimeTab" class="tabPanel">
       <section class="panel">
-        <h2>Runtime Selection</h2>
-        <div class="grid">
-          <label>
-            Calibration table
-            <select id="runtimeProfile"></select>
-          </label>
-          <label>
-            Signal K input source
-            <select id="runtimeSource"></select>
-          </label>
-        </div>
+        <h2>Table Backup</h2>
         <div class="actions">
-          <button id="activateRuntime" type="button">Activate runtime calibration</button>
-          <button id="deactivateRuntime" class="secondary" type="button">Deactivate runtime calibration</button>
-          <span id="runtimeActionStatus" class="inlineStatus" hidden>Updating runtime...</span>
+          <button id="exportTable" type="button">Export table</button>
+          <button id="importTable" class="secondary" type="button">Import table</button>
+          <input id="importTableFile" class="fileInput" type="file" accept=".json,application/json">
+          <button id="resetTable" class="danger" type="button">Reset table</button>
         </div>
-      </section>
-      <section class="panel">
-        <h2>Runtime Status</h2>
-        <div id="runtime" class="summary muted">Runtime not loaded.</div>
-      </section>
       </section>
     </main>
 
