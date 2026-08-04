@@ -1,6 +1,6 @@
 {
   "name": "signalk-compass-calibrator",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Signal K plugin that learns and publishes live magnetic heading corrections.",
   "main": "index.js",
   "scripts": {
@@ -44,6 +44,9 @@
   "signalk": {
     "displayName": "Compass Calibrator",
     "appIcon": "./icon.svg",
+    "recommends": [
+      "@meri-imperiumi/signalk-autostate"
+    ],
     "screenshots": [
       "./public/screenshot.png"
     ]

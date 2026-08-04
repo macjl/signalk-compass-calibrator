@@ -18,6 +18,7 @@ test('plugin schema exposes learning filters with runtime defaults', () => {
   assert.equal(schema.properties.filters.properties.maxHeadingRate.default, 2)
   assert.equal(schema.properties.filters.properties.maxSampleSkewSeconds.default, 2)
   assert.equal(schema.properties.filters.properties.maxSampleAgeSeconds.default, 3)
+  assert.equal(schema.properties.filters.properties.requireMotoringStateForLearning.default, true)
   assert.equal(schema.properties.filters.properties.startupDelaySeconds.default, 30)
 })
 
@@ -35,6 +36,7 @@ test('plugin subscribes to preferred upstream values with excludeSelf', () => {
   assert.equal(subscriptions.length, 1)
   assert.equal(subscriptions[0].subscription.sourcePolicy, undefined)
   assert.equal(subscriptions[0].subscription.excludeSelf, true)
+  assert.ok(subscriptions[0].subscription.subscribe.some(item => item.path === 'navigation.state'))
   plugin.stop()
 })
 
@@ -148,6 +150,122 @@ test('plugin accepts stale magnetic variation when dynamic inputs are fresh and 
       update('navigation.headingMagnetic', 100, now),
       update('navigation.courseOverGroundTrue', 102, now),
       update('navigation.speedOverGround', 4, now, { raw: true })
+    ]))
+
+    const state = await getState(plugin)
+    assert.equal(state.runtime.acceptedSamples, 1)
+    assert.equal(state.runtime.lastRejectReason, null)
+  } finally {
+    plugin.stop()
+  }
+})
+
+test('plugin rejects learning when navigation state is not motoring', async () => {
+  let callback = null
+  const app = fakeApp({
+    subscribe: (subscription, unsubscribes, errorHandler, subscribedCallback) => {
+      callback = subscribedCallback
+    }
+  })
+  const plugin = createPlugin(app)
+  try {
+    plugin.start({
+      filters: {
+        startupDelaySeconds: 0,
+        minSog: 0,
+        maxCogRate: 2,
+        maxHeadingRate: 2,
+        maxSampleAgeSeconds: 3,
+        maxSampleSkewSeconds: 2,
+        requireMotoringStateForLearning: true
+      }
+    })
+    await setLearning(plugin, true)
+
+    const now = Date.now()
+    callback(delta([
+      update('navigation.headingMagnetic', 100, now),
+      update('navigation.courseOverGroundTrue', 102, now),
+      update('navigation.speedOverGround', 4, now, { raw: true }),
+      update('navigation.magneticVariation', 3, now),
+      update('navigation.state', 'sailing', now, { raw: true })
+    ]))
+
+    const state = await getState(plugin)
+    assert.equal(state.runtime.acceptedSamples, 0)
+    assert.equal(state.runtime.lastRejectReason, 'navigation state is not motoring')
+  } finally {
+    plugin.stop()
+  }
+})
+
+test('plugin learns when navigation state is motoring', async () => {
+  let callback = null
+  const app = fakeApp({
+    subscribe: (subscription, unsubscribes, errorHandler, subscribedCallback) => {
+      callback = subscribedCallback
+    }
+  })
+  const plugin = createPlugin(app)
+  try {
+    plugin.start({
+      filters: {
+        startupDelaySeconds: 0,
+        minSog: 0,
+        maxCogRate: 2,
+        maxHeadingRate: 2,
+        maxSampleAgeSeconds: 3,
+        maxSampleSkewSeconds: 2,
+        requireMotoringStateForLearning: true
+      }
+    })
+    await setLearning(plugin, true)
+
+    const now = Date.now()
+    callback(delta([
+      update('navigation.headingMagnetic', 100, now),
+      update('navigation.courseOverGroundTrue', 102, now),
+      update('navigation.speedOverGround', 4, now, { raw: true }),
+      update('navigation.magneticVariation', 3, now),
+      update('navigation.state', 'motoring', now, { raw: true })
+    ]))
+
+    const state = await getState(plugin)
+    assert.equal(state.runtime.acceptedSamples, 1)
+    assert.equal(state.runtime.lastRejectReason, null)
+  } finally {
+    plugin.stop()
+  }
+})
+
+test('plugin learns when navigation state is absent', async () => {
+  let callback = null
+  const app = fakeApp({
+    subscribe: (subscription, unsubscribes, errorHandler, subscribedCallback) => {
+      callback = subscribedCallback
+    }
+  })
+  const plugin = createPlugin(app)
+  try {
+    plugin.start({
+      filters: {
+        startupDelaySeconds: 0,
+        minSog: 0,
+        maxCogRate: 2,
+        maxHeadingRate: 2,
+        maxSampleAgeSeconds: 3,
+        maxSampleSkewSeconds: 2,
+        requireMotoringStateForLearning: true
+      }
+    })
+    await setLearning(plugin, true)
+
+    const now = Date.now()
+    callback(delta([
+      update('navigation.headingMagnetic', 100, now),
+      update('navigation.courseOverGroundTrue', 102, now),
+      update('navigation.speedOverGround', 4, now, { raw: true }),
+      update('navigation.magneticVariation', 3, now)
     ]))
 
     const state = await getState(plugin)

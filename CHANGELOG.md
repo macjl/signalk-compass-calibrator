@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2] - 2026-08-04
+
+### Changed
+
+- Subscribe to `navigation.state` and, when available, learn only while it reports `motoring`.
+- Recommend `@meri-imperiumi/signalk-autostate` as a companion plugin.
+
 ## [0.3.1] - 2026-08-04
 
 ### Fixed

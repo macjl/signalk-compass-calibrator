@@ -79,7 +79,8 @@ module.exports = function createPlugin (app) {
         { path: INPUT_PATHS.heading, period: 500 },
         { path: INPUT_PATHS.cog, period: 500 },
         { path: INPUT_PATHS.sog, period: 500 },
-        { path: INPUT_PATHS.variation, period: 1000 }
+        { path: INPUT_PATHS.variation, period: 1000 },
+        { path: INPUT_PATHS.state, period: 6000 }
       ]
     }
 
@@ -108,6 +109,10 @@ module.exports = function createPlugin (app) {
       const source = sourceRef(update)
       const timestamp = normalizeTimestamp(update.timestamp) || now
       for (const item of update.values || []) {
+        if (item.path === INPUT_PATHS.state) {
+          updateInput(item.path, item.value, source, timestamp)
+          continue
+        }
         if (!isInputPath(item.path) || !Number.isFinite(item.value)) continue
         updateInput(item.path, item.value, source, timestamp)
         if (item.path === INPUT_PATHS.heading) publishCorrectedHeading(item.value, source, timestamp)
@@ -200,12 +205,17 @@ module.exports = function createPlugin (app) {
     const cog = inputs.get(INPUT_PATHS.cog)
     const sog = inputs.get(INPUT_PATHS.sog)
     const variation = inputs.get(INPUT_PATHS.variation)
+    const navigationState = inputs.get(INPUT_PATHS.state)
     const missing = []
     if (!heading) missing.push('heading')
     if (!cog) missing.push('COG')
     if (!sog) missing.push('SOG')
     if (!variation) missing.push('variation')
     if (missing.length) return { ok: false, reason: `missing ${missing.join(', ')}` }
+
+    if (options.filters.requireMotoringStateForLearning && navigationState && valueString(navigationState.value) !== 'motoring') {
+      return { ok: false, reason: 'navigation state is not motoring' }
+    }
 
     const dynamicInputs = [heading, cog, sog]
     const stale = dynamicInputs.filter(input => (now - input.timestamp) / 1000 > options.filters.maxSampleAgeSeconds)
@@ -376,6 +386,11 @@ function isInputPath (inputPath) {
 
 function sourceRef (update) {
   return update.$source || update.source && update.source.label || null
+}
+
+function valueString (value) {
+  if (value === null || value === undefined) return ''
+  return String(value).trim().toLowerCase()
 }
 
 function normalizeTimestamp (value) {

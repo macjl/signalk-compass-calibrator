@@ -1,6 +1,6 @@
 # Signal K Compass Calibrator
 
-Signal K plugin that learns an empirical magnetic heading correction while sailing and always republishes `navigation.headingMagnetic` as its own Signal K source.
+Signal K plugin that learns an empirical magnetic heading correction while underway and always republishes `navigation.headingMagnetic` as its own Signal K source.
 
 ## Status
 
@@ -39,7 +39,11 @@ Publication is always active when the plugin is enabled. If the table is empty, 
 published HDG = source HDG
 ```
 
-Enable learning only when underway in suitable conditions. The plugin rejects learning samples while inputs are missing, HDG/COG/SOG are stale or not timestamp-aligned, SOG is below the threshold, or COG/HDG is unstable. Magnetic variation must be present, but it does not need to be refreshed frequently. These learning filters are exposed in the plugin configuration with conservative defaults.
+Enable learning only when underway in suitable conditions. The plugin rejects learning samples while inputs are missing, HDG/COG/SOG are stale or not timestamp-aligned, SOG is below the threshold, COG/HDG is unstable, or `navigation.state` is available and does not report `motoring`. Magnetic variation must be present, but it does not need to be refreshed frequently. These learning filters are exposed in the plugin configuration with conservative defaults.
+
+When sailing, side force from the wind can create significant leeway, so the boat's heading and its course over ground may differ even when the compass is correct. This leeway is much smaller or absent when motoring, making COG a more reliable reference for learning heading correction.
+
+The plugin works well with [`@meri-imperiumi/signalk-autostate`](https://github.com/meri-imperiumi/signalk-autostate), which can publish `navigation.state` as `sailing`, `motoring`, `moored`, or `anchored`.
 
 Default runtime output:
 
